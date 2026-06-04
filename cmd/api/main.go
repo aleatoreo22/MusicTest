@@ -5,6 +5,7 @@ import (
 	"music-unified-backend/internal/api"
 	"music-unified-backend/internal/providers/soundcloud"
 	"music-unified-backend/internal/providers/spotify"
+	"music-unified-backend/internal/providers/youtube"
 	"music-unified-backend/internal/repository"
 	"os"
 
@@ -23,6 +24,7 @@ func main() {
 	// 2. Inicializa os Provedores
 	spotifyProv := spotify.NewProvider()
 	soundcloudProv := soundcloud.NewProvider()
+	youtubeProv := youtube.NewProvider()
 
 	// 3. Inicializa os Repositórios
 	userRepo := repository.NewGormUserRepository(db)
@@ -35,7 +37,7 @@ func main() {
 	}
 
 	// 4. Inicializa o Roteador passando as dependências
-	router := api.SetupRouter(userRepo, playlistRepo, musicRepo, spotifyProv, soundcloudProv)
+	router := api.SetupRouter(userRepo, playlistRepo, musicRepo, spotifyProv, soundcloudProv, youtubeProv)
 
 	log.Printf("Servidor iniciando na porta %s...", port)
 	if err := router.Run(":" + port); err != nil {

@@ -5,6 +5,7 @@ import (
 	"music-unified-backend/internal/models"
 	"music-unified-backend/internal/providers/soundcloud"
 	"music-unified-backend/internal/providers/spotify"
+	"music-unified-backend/internal/providers/youtube"
 	"music-unified-backend/internal/repository"
 	"os"
 
@@ -25,8 +26,9 @@ func setupTestRouter() (*gin.Engine, repository.UserRepository, repository.Playl
 
 	spotifyProv := spotify.NewProvider()
 	soundcloudProv := soundcloud.NewProvider()
+	youtubeProv := youtube.NewProvider()
 
-	r := api.SetupRouter(userRepo, playlistRepo, musicRepo, spotifyProv, soundcloudProv)
+	r := api.SetupRouter(userRepo, playlistRepo, musicRepo, spotifyProv, soundcloudProv, youtubeProv)
 
 	os.Setenv("JWT_SECRET", "test-secret")
 

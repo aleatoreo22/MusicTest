@@ -9,6 +9,7 @@ const (
 	SourceSpotify    TrackSource = "spotify"
 	SourceYTMusic    TrackSource = "ytmusic"
 	SourceSoundCloud TrackSource = "soundcloud"
+	SourceYouTube    TrackSource = "youtube"
 	SourceLocal      TrackSource = "local"
 )
 

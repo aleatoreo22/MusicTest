@@ -103,10 +103,34 @@ func (c *Client) SearchSoundCloud(query string) ([]Track, error) {
 	return tracks, nil
 }
 
+func (c *Client) SearchYouTube(query string) ([]Track, error) {
+	data, err := c.request("GET", fmt.Sprintf("/api/v1/search/youtube?q=%s", query), nil)
+	if err != nil {
+		return nil, err
+	}
+	var tracks []Track
+	json.Unmarshal(data, &tracks)
+	return tracks, nil
+}
+
 func (c *Client) GetStreamURL(source, sourceID string) (string, error) {
 	switch source {
 	case "soundcloud":
 		data, err := c.request("GET", "/api/v1/stream/soundcloud/"+sourceID, nil)
+		if err != nil {
+			return "", err
+		}
+		var resp struct {
+			URL       string `json:"url"`
+			Format    string `json:"format"`
+			ExpiresAt int64  `json:"expires_at"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return "", err
+		}
+		return resp.URL, nil
+	case "youtube":
+		data, err := c.request("GET", "/api/v1/stream/youtube/"+sourceID, nil)
 		if err != nil {
 			return "", err
 		}

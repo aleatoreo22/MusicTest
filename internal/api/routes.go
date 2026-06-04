@@ -5,6 +5,7 @@ import (
 	"music-unified-backend/internal/api/middleware"
 	"music-unified-backend/internal/providers/soundcloud"
 	"music-unified-backend/internal/providers/spotify"
+	"music-unified-backend/internal/providers/youtube"
 	"music-unified-backend/internal/repository"
 	"net/http"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // SetupRouter configura as rotas da API
-func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.PlaylistRepository, musicRepo repository.MusicRepository, spotifyProv *spotify.Provider, soundcloudProv *soundcloud.Provider) *gin.Engine {
+func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.PlaylistRepository, musicRepo repository.MusicRepository, spotifyProv *spotify.Provider, soundcloudProv *soundcloud.Provider, youtubeProv *youtube.Provider) *gin.Engine {
 	r := gin.Default()
 
 	// Handlers
@@ -22,7 +23,8 @@ func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.Pla
 	streamHandler := handlers.NewStreamHandler(musicRepo)
 	playerHandler := handlers.NewPlayerHandler(userRepo, spotifyProv)
 	soundcloudHandler := handlers.NewSoundCloudHandler(soundcloudProv)
-	providersHandler := handlers.NewProvidersHandler(spotifyProv, soundcloudProv)
+	youtubeHandler := handlers.NewYouTubeHandler(youtubeProv)
+	providersHandler := handlers.NewProvidersHandler(spotifyProv, soundcloudProv, youtubeProv)
 
 	// Rota de saúde
 	r.GET("/health", func(c *gin.Context) {
@@ -47,7 +49,9 @@ func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.Pla
 			protected.GET("/auth/spotify/status", spotifyHandler.GetStatus)
 			protected.GET("/search/spotify", spotifyHandler.Search)
 			protected.GET("/search/soundcloud", soundcloudHandler.Search)
+			protected.GET("/search/youtube", youtubeHandler.Search)
 			protected.GET("/stream/soundcloud/:id", soundcloudHandler.Stream)
+			protected.GET("/stream/youtube/:id", youtubeHandler.Stream)
 
 			// Player (Spotify Connect)
 			player := protected.Group("/player")

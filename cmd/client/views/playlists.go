@@ -3,6 +3,7 @@ package views
 import (
 	"fmt"
 	"music-unified-backend/cmd/client/api"
+	"music-unified-backend/pkg/utils"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,6 +27,10 @@ type PlaylistView struct {
 	State          playbackState
 	PlayingURI     string
 	PlayerErr      string
+
+	// Local playback (mpv) pra SoundCloud/YouTube na playlist
+	LocalPlayer *utils.Player
+	LocalURL    string
 }
 
 func NewPlaylistView(client *api.Client) *PlaylistView {
@@ -74,6 +79,24 @@ func (v *PlaylistView) Update(msg tea.Msg, client *api.Client) (*PlaylistView, t
 		if msg.err != nil {
 			v.PlayerErr = msg.err.Error()
 		}
+	case localResolveMsg:
+		v.Pending = false
+		if msg.err != nil {
+			v.PlayerErr = "Erro ao resolver stream: " + msg.err.Error()
+			return v, nil
+		}
+		v.stopLocal()
+		player, err := utils.Play(msg.stream)
+		if err != nil {
+			v.PlayerErr = err.Error()
+			v.State = stateStopped
+			return v, nil
+		}
+		v.LocalPlayer = player
+		v.LocalURL = msg.stream
+		v.State = statePlaying
+		v.PlayingURI = playingURIFor(msg.track)
+		v.PlayerErr = ""
 	}
 	return v, nil
 }
@@ -157,33 +180,55 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		if v.Pending {
 			return v, nil
 		}
-		switch v.State {
-		case statePaused:
-			v.PlayerErr = ""
-			v.Pending = true
-			return v, resumeCmd(v.Client)
-		default:
-			if len(tracks) == 0 {
-				return v, nil
+		if isConnectSource(tracksOrSource(tracks)) {
+			switch v.State {
+			case statePaused:
+				v.PlayerErr = ""
+				v.Pending = true
+				return v, resumeCmd(v.Client)
+			default:
+				if len(tracks) == 0 {
+					return v, nil
+				}
+				track := tracks[v.TracksSelected]
+				uri, err := buildPlayableURI(track)
+				if err != nil {
+					v.PlayerErr = err.Error()
+					return v, nil
+				}
+				v.PlayerErr = ""
+				v.Pending = true
+				return v, playTrackCmd(v.Client, uri)
 			}
-			track := tracks[v.TracksSelected]
-			uri, err := buildPlayableURI(track)
-			if err != nil {
-				v.PlayerErr = err.Error()
-				return v, nil
-			}
-			v.PlayerErr = ""
-			v.Pending = true
-			return v, playTrackCmd(v.Client, uri)
 		}
-	case "ctrl+s":
-		if v.State != statePlaying || v.Pending {
+		// SoundCloud/YouTube na playlist: resolve URL e toca via mpv local
+		if len(tracks) == 0 {
+			return v, nil
+		}
+		track := tracks[v.TracksSelected]
+		if track.SourceID == "" {
+			v.PlayerErr = "Faixa sem ID"
 			return v, nil
 		}
 		v.PlayerErr = ""
 		v.Pending = true
-		return v, pauseCmd(v.Client)
+		return v, resolveAndPlayLocalCmd(v.Client, track)
+	case "ctrl+s":
+		if v.State != statePlaying || v.Pending {
+			return v, nil
+		}
+		if isConnectSource(tracksOrSource(tracks)) {
+			v.PlayerErr = ""
+			v.Pending = true
+			return v, pauseCmd(v.Client)
+		}
+		// Local: mata o player
+		v.stopLocal()
+		v.State = statePaused
 	case "ctrl+n":
+		if !isConnectSource(tracksOrSource(tracks)) {
+			return v, nil
+		}
 		if v.State == stateStopped || v.Pending {
 			return v, nil
 		}
@@ -191,6 +236,9 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		v.Pending = true
 		return v, nextCmd(v.Client)
 	case "ctrl+b":
+		if !isConnectSource(tracksOrSource(tracks)) {
+			return v, nil
+		}
 		if v.State == stateStopped || v.Pending {
 			return v, nil
 		}
@@ -201,6 +249,23 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 	return v, nil
 }
 
+// tracksOrSource retorna a source da faixa atualmente selecionada, ou ""
+// se a lista está vazia. Usado pra rotear play/pause/next entre Connect e local.
+func tracksOrSource(tracks []api.Track) string {
+	if len(tracks) == 0 {
+		return ""
+	}
+	return tracks[0].Source
+}
+
+func (v *PlaylistView) stopLocal() {
+	if v.LocalPlayer != nil {
+		_ = v.LocalPlayer.Stop()
+		v.LocalPlayer = nil
+	}
+	v.LocalURL = ""
+}
+
 func (v *PlaylistView) currentTracks() []api.Track {
 	if v.Selected < 0 || v.Selected >= len(v.Playlists) {
 		return nil
@@ -208,16 +273,17 @@ func (v *PlaylistView) currentTracks() []api.Track {
 	return v.Playlists[v.Selected].Tracks
 }
 
+// buildPlayableURI gera URI no formato esperado pelo Spotify Connect
+// pra faixas do Spotify. Pra outras fontes, retorna erro — playback local
+// é tratado via resolveAndPlayLocalCmd.
 func buildPlayableURI(track api.Track) (string, error) {
-	switch track.Source {
-	case "spotify":
-		if track.SourceID == "" {
-			return "", fmt.Errorf("faixa sem ID do Spotify")
-		}
-		return "spotify:track:" + track.SourceID, nil
-	default:
-		return "", fmt.Errorf("playback de %s ainda não implementado", track.Source)
+	if track.Source != "spotify" {
+		return "", fmt.Errorf("playback local: use resolveAndPlayLocalCmd para %s", track.Source)
 	}
+	if track.SourceID == "" {
+		return "", fmt.Errorf("faixa sem ID do Spotify")
+	}
+	return "spotify:track:" + track.SourceID, nil
 }
 
 func (v *PlaylistView) View() string {

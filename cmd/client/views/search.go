@@ -12,6 +12,7 @@ import (
 const (
 	sourceSpotify    = "spotify"
 	sourceSoundCloud = "soundcloud"
+	sourceYouTube    = "youtube"
 )
 
 type SearchView struct {
@@ -51,7 +52,7 @@ func NewSearchView(client *api.Client) *SearchView {
 		Source:           sourceSpotify,
 		Mode:             0,
 		State:            stateStopped,
-		availableSources: []string{sourceSpotify, sourceSoundCloud},
+		availableSources: []string{sourceSpotify, sourceSoundCloud, sourceYouTube},
 	}
 }
 
@@ -86,6 +87,78 @@ func (v *SearchView) cycleSource() {
 		}
 	}
 	v.Source = v.availableSources[0]
+}
+
+// isConnectSource retorna true pra fontes que usam Spotify Connect
+// (hoje só Spotify). Demais fontes tocam via player local (mpv).
+func isConnectSource(src string) bool {
+	return src == sourceSpotify
+}
+
+// sourceLabel é o nome amigável pra UI.
+func sourceLabel(src string) string {
+	switch src {
+	case sourceSoundCloud:
+		return "SoundCloud"
+	case sourceYouTube:
+		return "YouTube"
+	default:
+		return "Spotify"
+	}
+}
+
+// sourceColor é a cor do título no header.
+func sourceColor(src string) string {
+	switch src {
+	case sourceSoundCloud:
+		return "6"
+	case sourceYouTube:
+		return "1"
+	default:
+		return "5"
+	}
+}
+
+// playingURIFor gera uma chave estável pra identificar a faixa "tocando"
+// na view (independente do backend — Connect ou local). Usada pro marker ▶/⏸.
+func playingURIFor(track api.Track) string {
+	if track.SourceID == "" {
+		return ""
+	}
+	switch track.Source {
+	case sourceSpotify:
+		return "spotify:track:" + track.SourceID
+	case sourceSoundCloud:
+		return "soundcloud:" + track.SourceID
+	case sourceYouTube:
+		return "youtube:" + track.SourceID
+	}
+	return ""
+}
+
+// doSearch roteia a busca pelo cliente certo baseado em v.Source.
+func (v *SearchView) doSearch(query string) ([]api.Track, error) {
+	switch v.Source {
+	case sourceSoundCloud:
+		return v.Client.SearchSoundCloud(query)
+	case sourceYouTube:
+		return v.Client.SearchYouTube(query)
+	default:
+		return v.Client.SearchSpotify(query)
+	}
+}
+
+// nextSource retorna a próxima fonte disponível (pra hint "Tab: X").
+func (v *SearchView) nextSource() string {
+	if len(v.availableSources) <= 1 {
+		return ""
+	}
+	for i, s := range v.availableSources {
+		if s == v.Source {
+			return v.availableSources[(i+1)%len(v.availableSources)]
+		}
+	}
+	return ""
 }
 
 type addTrackResultMsg struct {
@@ -178,7 +251,7 @@ func (v *SearchView) Update(msg tea.Msg, client *api.Client) (*SearchView, tea.C
 		v.LocalPlayer = player
 		v.LocalURL = msg.stream
 		v.State = statePlaying
-		v.PlayingURI = "soundcloud:" + msg.track.SourceID
+		v.PlayingURI = playingURIFor(msg.track)
 		v.PlayerErr = ""
 		v.PlayerMsg = "▶ " + msg.track.Title + " - " + msg.track.Artist
 	case playlistsLoadedMsg:
@@ -221,15 +294,7 @@ func (v *SearchView) updateInputMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		if v.Query == "" {
 			return v, nil
 		}
-		var (
-			results []api.Track
-			err     error
-		)
-		if v.Source == sourceSpotify {
-			results, err = v.Client.SearchSpotify(v.Query)
-		} else {
-			results, err = v.Client.SearchSoundCloud(v.Query)
-		}
+		results, err := v.doSearch(v.Query)
 		if err != nil {
 			v.PlayerErr = err.Error()
 			v.Mode = 1
@@ -273,7 +338,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 			return v, nil
 		}
 		// Spotify: usa Connect
-		if v.Source == sourceSpotify {
+		if isConnectSource(v.Source) {
 			switch v.State {
 			case statePaused:
 				v.PlayerErr = ""
@@ -294,7 +359,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 				return v, playTrackCmd(v.Client, uri)
 			}
 		}
-		// SoundCloud ou outra fonte local: resolve URL e toca via mpv
+		// SoundCloud/YouTube/outra fonte local: resolve URL e toca via mpv
 		if len(v.Results) == 0 {
 			return v, nil
 		}
@@ -307,7 +372,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		v.Pending = true
 		return v, resolveAndPlayLocalCmd(v.Client, track)
 	case "ctrl+s":
-		if v.Source == sourceSpotify {
+		if isConnectSource(v.Source) {
 			if v.State != statePlaying || v.Pending {
 				return v, nil
 			}
@@ -320,7 +385,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		v.State = statePaused
 	case "ctrl+n", "ctrl+b":
 		// Next/Previous só faz sentido em Spotify Connect
-		if v.Source != sourceSpotify {
+		if !isConnectSource(v.Source) {
 			return v, nil
 		}
 		if v.State == stateStopped || v.Pending {
@@ -413,18 +478,10 @@ func (v *SearchView) stopLocal() {
 }
 
 func (v *SearchView) View() string {
-	titleColor := "5"
-	if v.Source == sourceSoundCloud {
-		titleColor = "6"
-	}
-	sourceLabel := "Spotify"
-	if v.Source == sourceSoundCloud {
-		sourceLabel = "SoundCloud"
-	}
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color(titleColor)).
-		Render(fmt.Sprintf("🔍 Search %s", sourceLabel))
+		Foreground(lipgloss.Color(sourceColor(v.Source))).
+		Render(fmt.Sprintf("🔍 Search %s", sourceLabel(v.Source)))
 
 	switch v.Mode {
 	case 0:
@@ -440,19 +497,12 @@ func (v *SearchView) View() string {
 }
 
 func (v *SearchView) viewInput(title string) string {
-	sourceTag := "[Spotify]"
-	if v.Source == sourceSoundCloud {
-		sourceTag = "[SoundCloud]"
-	}
+	sourceTag := "[" + sourceLabel(v.Source) + "]"
 	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 
 	header := activeStyle.Render(sourceTag)
-	if len(v.availableSources) > 1 {
-		other := "[Spotify]"
-		if v.Source == sourceSpotify {
-			other = "[SoundCloud]"
-		}
-		header = activeStyle.Render(sourceTag) + "  " + dimStyle.Render("Tab: "+other)
+	if next := v.nextSource(); next != "" {
+		header = activeStyle.Render(sourceTag) + "  " + dimStyle.Render("Tab: ["+sourceLabel(next)+"]")
 	}
 
 	input := lipgloss.NewStyle().
@@ -627,14 +677,4 @@ func (v *SearchView) viewNewPlaylist(title string) string {
 		"",
 		"Enter: Create & Add | Esc: Back",
 	)
-}
-
-func playingURIFor(track api.Track) string {
-	if track.Source == sourceSpotify && track.SourceID != "" {
-		return "spotify:track:" + track.SourceID
-	}
-	if track.Source == sourceSoundCloud && track.SourceID != "" {
-		return "soundcloud:" + track.SourceID
-	}
-	return ""
 }
