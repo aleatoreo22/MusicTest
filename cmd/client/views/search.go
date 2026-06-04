@@ -3,14 +3,21 @@ package views
 import (
 	"fmt"
 	"music-unified-backend/cmd/client/api"
+	"music-unified-backend/pkg/utils"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	sourceSpotify    = "spotify"
+	sourceSoundCloud = "soundcloud"
+)
+
 type SearchView struct {
 	Client     *api.Client
 	Query      string
+	Source     string // sourceSpotify | sourceSoundCloud
 	Results    []api.Track
 	Selected   int
 	Back       bool
@@ -22,21 +29,63 @@ type SearchView struct {
 	PlayerErr  string
 	width      int
 
+	// Local playback (mpv) para SoundCloud e fontes que não usam Connect
+	LocalPlayer *utils.Player
+	LocalURL    string
+
 	// Playlist picker
-	Playlists          []api.Playlist
-	PlaylistSelected   int
-	PlaylistLoading    bool
-	NewPlaylistName    string
-	TrackToAdd         api.Track
-	AddResultPending   bool
+	Playlists        []api.Playlist
+	PlaylistSelected int
+	PlaylistLoading  bool
+	NewPlaylistName  string
+	TrackToAdd       api.Track
+	AddResultPending bool
+
+	// Providers disponíveis
+	availableSources []string
 }
 
 func NewSearchView(client *api.Client) *SearchView {
 	return &SearchView{
-		Client: client,
-		Mode:   0,
-		State:  stateStopped,
+		Client:           client,
+		Source:           sourceSpotify,
+		Mode:             0,
+		State:            stateStopped,
+		availableSources: []string{sourceSpotify, sourceSoundCloud},
 	}
+}
+
+func (v *SearchView) SetAvailableSources(sources []string) {
+	v.availableSources = sources
+	if len(sources) == 0 {
+		v.Source = sourceSpotify
+		return
+	}
+	if !v.hasSource(v.Source) {
+		v.Source = sources[0]
+	}
+}
+
+func (v *SearchView) hasSource(s string) bool {
+	for _, x := range v.availableSources {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *SearchView) cycleSource() {
+	if len(v.availableSources) <= 1 {
+		return
+	}
+	for i, s := range v.availableSources {
+		if s == v.Source {
+			v.Source = v.availableSources[(i+1)%len(v.availableSources)]
+			return
+		}
+	}
+	v.Source = v.availableSources[0]
 }
 
 type addTrackResultMsg struct {
@@ -47,6 +96,12 @@ type addTrackResultMsg struct {
 type createPlaylistResultMsg struct {
 	name string
 	err  error
+}
+
+type localResolveMsg struct {
+	track  api.Track
+	stream string
+	err    error
 }
 
 func addTrackCmd(client *api.Client, playlistID uint, track api.Track, name string) tea.Cmd {
@@ -66,6 +121,13 @@ func createPlaylistAndAddCmd(client *api.Client, name string, track api.Track) t
 			return addTrackResultMsg{playlistName: pl.Name, err: err}
 		}
 		return addTrackResultMsg{playlistName: pl.Name}
+	}
+}
+
+func resolveAndPlayLocalCmd(client *api.Client, track api.Track) tea.Cmd {
+	return func() tea.Msg {
+		url, err := client.GetStreamURL(track.Source, track.SourceID)
+		return localResolveMsg{track: track, stream: url, err: err}
 	}
 }
 
@@ -100,6 +162,25 @@ func (v *SearchView) Update(msg tea.Msg, client *api.Client) (*SearchView, tea.C
 		if msg.err != nil {
 			v.PlayerErr = msg.err.Error()
 		}
+	case localResolveMsg:
+		v.Pending = false
+		if msg.err != nil {
+			v.PlayerErr = "Erro ao resolver stream: " + msg.err.Error()
+			return v, nil
+		}
+		v.stopLocal()
+		player, err := utils.Play(msg.stream)
+		if err != nil {
+			v.PlayerErr = err.Error()
+			v.State = stateStopped
+			return v, nil
+		}
+		v.LocalPlayer = player
+		v.LocalURL = msg.stream
+		v.State = statePlaying
+		v.PlayingURI = "soundcloud:" + msg.track.SourceID
+		v.PlayerErr = ""
+		v.PlayerMsg = "▶ " + msg.track.Title + " - " + msg.track.Artist
 	case playlistsLoadedMsg:
 		v.PlaylistLoading = false
 		if msg.err != nil {
@@ -134,19 +215,30 @@ func (v *SearchView) updateInputMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		v.Back = true
 		v.Mode = 0
 		v.Query = ""
+	case "tab":
+		v.cycleSource()
 	case "enter":
-		if v.Query != "" {
-			results, err := v.Client.SearchSpotify(v.Query)
-			if err != nil {
-				v.PlayerErr = err.Error()
-				v.Mode = 1
-			} else {
-				v.Results = results
-				v.Mode = 1
-				v.Selected = 0
-				v.PlayerErr = ""
-				v.PlayerMsg = ""
-			}
+		if v.Query == "" {
+			return v, nil
+		}
+		var (
+			results []api.Track
+			err     error
+		)
+		if v.Source == sourceSpotify {
+			results, err = v.Client.SearchSpotify(v.Query)
+		} else {
+			results, err = v.Client.SearchSoundCloud(v.Query)
+		}
+		if err != nil {
+			v.PlayerErr = err.Error()
+			v.Mode = 1
+		} else {
+			v.Results = results
+			v.Mode = 1
+			v.Selected = 0
+			v.PlayerErr = ""
+			v.PlayerMsg = ""
 		}
 	case "backspace":
 		if len(v.Query) > 0 {
@@ -166,6 +258,8 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		v.Back = true
 		v.Mode = 0
 		v.Query = ""
+	case "tab":
+		v.cycleSource()
 	case "up", "k":
 		if v.Selected > 0 {
 			v.Selected--
@@ -178,45 +272,65 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		if v.Pending {
 			return v, nil
 		}
-		switch v.State {
-		case statePaused:
-			v.PlayerErr = ""
-			v.Pending = true
-			return v, resumeCmd(v.Client)
-		default:
-			if len(v.Results) == 0 {
-				return v, nil
-			}
-			track := v.Results[v.Selected]
-			if track.SourceID == "" {
-				v.PlayerErr = "Faixa sem ID do Spotify"
-				return v, nil
-			}
-			uri := "spotify:track:" + track.SourceID
-			v.PlayerErr = ""
-			v.Pending = true
+		// Spotify: usa Connect
+		if v.Source == sourceSpotify {
+			switch v.State {
+			case statePaused:
+				v.PlayerErr = ""
+				v.Pending = true
+				return v, resumeCmd(v.Client)
+			default:
+				if len(v.Results) == 0 {
+					return v, nil
+				}
+				track := v.Results[v.Selected]
+				if track.SourceID == "" {
+					v.PlayerErr = "Faixa sem ID do Spotify"
+					return v, nil
+				}
+				uri := "spotify:track:" + track.SourceID
+				v.PlayerErr = ""
+				v.Pending = true
 				return v, playTrackCmd(v.Client, uri)
+			}
 		}
+		// SoundCloud ou outra fonte local: resolve URL e toca via mpv
+		if len(v.Results) == 0 {
+			return v, nil
+		}
+		track := v.Results[v.Selected]
+		if track.SourceID == "" {
+			v.PlayerErr = "Faixa sem ID"
+			return v, nil
+		}
+		v.PlayerErr = ""
+		v.Pending = true
+		return v, resolveAndPlayLocalCmd(v.Client, track)
 	case "ctrl+s":
-		if v.State != statePlaying || v.Pending {
+		if v.Source == sourceSpotify {
+			if v.State != statePlaying || v.Pending {
+				return v, nil
+			}
+			v.PlayerErr = ""
+			v.Pending = true
+			return v, pauseCmd(v.Client)
+		}
+		// Local: mata o player (resume reinicia do começo)
+		v.stopLocal()
+		v.State = statePaused
+	case "ctrl+n", "ctrl+b":
+		// Next/Previous só faz sentido em Spotify Connect
+		if v.Source != sourceSpotify {
 			return v, nil
 		}
-		v.PlayerErr = ""
-		v.Pending = true
-		return v, pauseCmd(v.Client)
-	case "ctrl+n":
 		if v.State == stateStopped || v.Pending {
 			return v, nil
 		}
 		v.PlayerErr = ""
 		v.Pending = true
-		return v, nextCmd(v.Client)
-	case "ctrl+b":
-		if v.State == stateStopped || v.Pending {
-			return v, nil
+		if msg.String() == "ctrl+n" {
+			return v, nextCmd(v.Client)
 		}
-		v.PlayerErr = ""
-		v.Pending = true
 		return v, previousCmd(v.Client)
 	case "ctrl+a":
 		if len(v.Results) == 0 || v.AddResultPending {
@@ -242,7 +356,6 @@ func (v *SearchView) updatePlaylistPickerMode(msg tea.KeyMsg) (*SearchView, tea.
 			v.PlaylistSelected--
 		}
 	case "down", "j":
-		// +1 para a opção "+ Nova playlist"
 		max := len(v.Playlists)
 		if v.PlaylistSelected < max {
 			v.PlaylistSelected++
@@ -251,13 +364,11 @@ func (v *SearchView) updatePlaylistPickerMode(msg tea.KeyMsg) (*SearchView, tea.
 		if v.AddResultPending {
 			return v, nil
 		}
-		// index 0 = "+ Nova playlist"
 		if v.PlaylistSelected == 0 {
 			v.Mode = 3
 			v.NewPlaylistName = ""
 			return v, nil
 		}
-		// index >= 1 = playlist real
 		idx := v.PlaylistSelected - 1
 		if idx >= len(v.Playlists) {
 			return v, nil
@@ -293,11 +404,27 @@ func (v *SearchView) updateNewPlaylistMode(msg tea.KeyMsg) (*SearchView, tea.Cmd
 	return v, nil
 }
 
+func (v *SearchView) stopLocal() {
+	if v.LocalPlayer != nil {
+		_ = v.LocalPlayer.Stop()
+		v.LocalPlayer = nil
+	}
+	v.LocalURL = ""
+}
+
 func (v *SearchView) View() string {
+	titleColor := "5"
+	if v.Source == sourceSoundCloud {
+		titleColor = "6"
+	}
+	sourceLabel := "Spotify"
+	if v.Source == sourceSoundCloud {
+		sourceLabel = "SoundCloud"
+	}
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("5")).
-		Render("🔍 Search Spotify")
+		Foreground(lipgloss.Color(titleColor)).
+		Render(fmt.Sprintf("🔍 Search %s", sourceLabel))
 
 	switch v.Mode {
 	case 0:
@@ -313,18 +440,31 @@ func (v *SearchView) View() string {
 }
 
 func (v *SearchView) viewInput(title string) string {
+	sourceTag := "[Spotify]"
+	if v.Source == sourceSoundCloud {
+		sourceTag = "[SoundCloud]"
+	}
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	other := "[Spotify]"
+	if v.Source == sourceSpotify {
+		other = "[SoundCloud]"
+	}
+	header := activeStyle.Render(sourceTag) + "  " + dimStyle.Render("Tab: "+other)
+
 	input := lipgloss.NewStyle().
 		Background(lipgloss.Color("4")).
 		Foreground(lipgloss.Color("15")).
 		Padding(0, 1).
 		Render("Search: " + v.Query + "_")
+
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		title,
+		header,
 		"",
 		input,
 		"",
-		"Press Enter to search | Esc to go back",
+		"Enter: Search | Tab: Switch source | Esc: Back",
 	)
 }
 
@@ -343,9 +483,9 @@ func (v *SearchView) viewResults(title string) string {
 					Foreground(lipgloss.Color("15")).
 					Padding(0, 1)
 			}
-			uri := "spotify:track:" + track.SourceID
+			uri := playingURIFor(track)
 			marker := "  "
-			if v.State != stateStopped && uri == v.PlayingURI {
+			if v.State != stateStopped && uri != "" && uri == v.PlayingURI {
 				switch v.State {
 				case statePlaying:
 					marker = "▶ "
@@ -353,7 +493,8 @@ func (v *SearchView) viewResults(title string) string {
 					marker = "⏸ "
 				}
 			}
-			results += style.Render(fmt.Sprintf("%s%s - %s\n", marker, track.Title, track.Artist))
+			srcTag := "[" + track.Source + "]"
+			results += style.Render(fmt.Sprintf("%s%s %s - %s\n", marker, srcTag, track.Title, track.Artist))
 		}
 	}
 
@@ -361,12 +502,18 @@ func (v *SearchView) viewResults(title string) string {
 	switch {
 	case v.PlayerErr != "":
 		status = errorStyle.Render("⚠ " + v.PlayerErr)
-	case v.PlayerMsg != "":
+	case v.PlayerMsg != "" && v.State != statePlaying:
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(v.PlayerMsg)
 	case v.Pending:
-		status = dimStyle.Render("⏳ Enviando para o Spotify...")
+		status = dimStyle.Render("⏳ ...")
 	case v.State == statePlaying:
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("▶ Tocando no Spotify")
+		backend := "Spotify Connect"
+		if v.LocalPlayer != nil {
+			backend = v.LocalPlayer.Backend() + " (local)"
+		}
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
+			"▶ Tocando via " + backend,
+		)
 	case v.State == statePaused:
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("⏸ Pausado")
 	}
@@ -379,14 +526,14 @@ func (v *SearchView) viewResults(title string) string {
 		"",
 		status,
 		"",
-		"[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+N] Next  [Ctrl+B] Previous  [Ctrl+A] Add to playlist  ↑/↓: Nav  Esc: Back",
+		"[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  [Tab] Source  ↑/↓: Nav  Esc: Back",
 	)
 }
 
 func (v *SearchView) viewPlaylistPicker(title string) string {
 	subtitle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("8")).
-		Render(fmt.Sprintf("Adicionar \"%s - %s\" em:", v.TrackToAdd.Title, v.TrackToAdd.Artist))
+		Render(fmt.Sprintf("Adicionar \"%s - %s\" [%s] em:", v.TrackToAdd.Title, v.TrackToAdd.Artist, v.TrackToAdd.Source))
 
 	if v.PlaylistLoading {
 		return lipgloss.JoinVertical(
@@ -440,7 +587,7 @@ func (v *SearchView) viewPlaylistPicker(title string) string {
 func (v *SearchView) viewNewPlaylist(title string) string {
 	subtitle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("8")).
-		Render(fmt.Sprintf("Criar playlist e adicionar \"%s\":", v.TrackToAdd.Title))
+		Render(fmt.Sprintf("Criar playlist e adicionar \"%s\" [%s]:", v.TrackToAdd.Title, v.TrackToAdd.Source))
 
 	input := lipgloss.NewStyle().
 		Background(lipgloss.Color("4")).
@@ -467,4 +614,14 @@ func (v *SearchView) viewNewPlaylist(title string) string {
 		"",
 		"Enter: Create & Add | Esc: Back",
 	)
+}
+
+func playingURIFor(track api.Track) string {
+	if track.Source == sourceSpotify && track.SourceID != "" {
+		return "spotify:track:" + track.SourceID
+	}
+	if track.Source == sourceSoundCloud && track.SourceID != "" {
+		return "soundcloud:" + track.SourceID
+	}
+	return ""
 }

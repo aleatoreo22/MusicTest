@@ -30,6 +30,13 @@ func NewProvider() *Provider {
 	}
 }
 
+func (p *Provider) Enabled() bool {
+	id := os.Getenv("SPOTIFY_CLIENT_ID")
+	secret := os.Getenv("SPOTIFY_CLIENT_SECRET")
+	return id != "" && secret != "" &&
+		id != "seu_client_id_aqui" && secret != "seu_client_secret_aqui"
+}
+
 func (p *Provider) GetAuthURL(state string) string {
 	test := p.auth.AuthURL(state)
 	println(test)

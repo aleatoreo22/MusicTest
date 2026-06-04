@@ -93,6 +93,51 @@ func (c *Client) SearchSpotify(query string) ([]Track, error) {
 	return tracks, nil
 }
 
+func (c *Client) SearchSoundCloud(query string) ([]Track, error) {
+	data, err := c.request("GET", fmt.Sprintf("/api/v1/search/soundcloud?q=%s", query), nil)
+	if err != nil {
+		return nil, err
+	}
+	var tracks []Track
+	json.Unmarshal(data, &tracks)
+	return tracks, nil
+}
+
+func (c *Client) GetStreamURL(source, sourceID string) (string, error) {
+	switch source {
+	case "soundcloud":
+		data, err := c.request("GET", "/api/v1/stream/soundcloud/"+sourceID, nil)
+		if err != nil {
+			return "", err
+		}
+		var resp struct {
+			URL       string `json:"url"`
+			Format    string `json:"format"`
+			ExpiresAt int64  `json:"expires_at"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return "", err
+		}
+		return resp.URL, nil
+	default:
+		return "", fmt.Errorf("stream não implementado para source=%s", source)
+	}
+}
+
+func (c *Client) GetProviders() ([]string, error) {
+	data, err := c.request("GET", "/api/v1/providers", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Providers, nil
+}
+
 func (c *Client) GetPlaylists() ([]Playlist, error) {
 	data, err := c.request("GET", "/api/v1/playlists", nil)
 	if err != nil {

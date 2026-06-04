@@ -15,6 +15,9 @@ type Model struct {
 	searchView   *views.SearchView
 	playlistView *views.PlaylistView
 	spotifyView  *views.SpotifyLinkView
+
+	providers       []string
+	providersLoaded bool
 }
 
 const (
@@ -38,6 +41,18 @@ func NewModel() *Model {
 	}
 }
 
+type providersLoadedMsg struct {
+	providers []string
+	err       error
+}
+
+func loadProvidersCmd(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		p, err := client.GetProviders()
+		return providersLoadedMsg{providers: p, err: err}
+	}
+}
+
 func (m *Model) Init() tea.Cmd {
 	return nil
 }
@@ -48,6 +63,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+	case providersLoadedMsg:
+		if msg.err == nil {
+			m.providers = msg.providers
+		}
+		m.providersLoaded = true
+		if m.homeView != nil {
+			m.homeView.SetProviders(m.providers)
+		}
+		return m, nil
 	}
 
 	switch m.state {
@@ -56,19 +80,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authView, cmd = m.authView.Update(msg, m.apiClient)
 		if m.authView.IsAuthenticated {
 			m.state = homeState
+			if !m.providersLoaded {
+				return m, loadProvidersCmd(m.apiClient)
+			}
 		}
 		return m, cmd
 	case homeState:
+		if !m.providersLoaded {
+			return m, loadProvidersCmd(m.apiClient)
+		}
 		var cmd tea.Cmd
 		m.homeView, cmd = m.homeView.Update(msg)
 		if m.homeView.SwitchTo != "" {
 			switch m.homeView.SwitchTo {
 			case "search":
 				m.state = searchState
-				m.searchView = views.NewSearchView(m.apiClient) // Passa client com token
+				m.searchView = views.NewSearchView(m.apiClient)
+				m.searchView.SetAvailableSources(m.providers)
 			case "playlist":
 				m.state = playlistState
-				// Carrega playlists quando abre
 				m.playlistView = views.NewPlaylistView(m.apiClient)
 				if playlists, err := m.apiClient.GetPlaylists(); err == nil {
 					m.playlistView.Playlists = playlists
@@ -79,6 +109,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "auth":
 				m.state = authState
 				m.authView = views.NewAuthView()
+				m.providersLoaded = false
+				m.providers = nil
 			}
 			m.homeView.SwitchTo = ""
 		}
