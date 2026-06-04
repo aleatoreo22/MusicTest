@@ -180,17 +180,18 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		if v.Pending {
 			return v, nil
 		}
-		if isConnectSource(tracksOrSource(tracks)) {
+		if len(tracks) == 0 {
+			return v, nil
+		}
+		track := tracks[v.TracksSelected]
+		// Decide roteamento pela source do track SELECIONADO (não do primeiro)
+		if isConnectSource(track.Source) {
 			switch v.State {
 			case statePaused:
 				v.PlayerErr = ""
 				v.Pending = true
 				return v, resumeCmd(v.Client)
 			default:
-				if len(tracks) == 0 {
-					return v, nil
-				}
-				track := tracks[v.TracksSelected]
 				uri, err := buildPlayableURI(track)
 				if err != nil {
 					v.PlayerErr = err.Error()
@@ -202,10 +203,6 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 			}
 		}
 		// SoundCloud/YouTube na playlist: resolve URL e toca via mpv local
-		if len(tracks) == 0 {
-			return v, nil
-		}
-		track := tracks[v.TracksSelected]
 		if track.SourceID == "" {
 			v.PlayerErr = "Faixa sem ID"
 			return v, nil
@@ -217,7 +214,7 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		if v.State != statePlaying || v.Pending {
 			return v, nil
 		}
-		if isConnectSource(tracksOrSource(tracks)) {
+		if len(tracks) > 0 && isConnectSource(tracks[v.TracksSelected].Source) {
 			v.PlayerErr = ""
 			v.Pending = true
 			return v, pauseCmd(v.Client)
@@ -226,7 +223,7 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		v.stopLocal()
 		v.State = statePaused
 	case "ctrl+n":
-		if !isConnectSource(tracksOrSource(tracks)) {
+		if len(tracks) == 0 || !isConnectSource(tracks[v.TracksSelected].Source) {
 			return v, nil
 		}
 		if v.State == stateStopped || v.Pending {
@@ -236,7 +233,7 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		v.Pending = true
 		return v, nextCmd(v.Client)
 	case "ctrl+b":
-		if !isConnectSource(tracksOrSource(tracks)) {
+		if len(tracks) == 0 || !isConnectSource(tracks[v.TracksSelected].Source) {
 			return v, nil
 		}
 		if v.State == stateStopped || v.Pending {
@@ -247,15 +244,6 @@ func (v *PlaylistView) updateTracksMode(msg tea.KeyMsg) (*PlaylistView, tea.Cmd)
 		return v, previousCmd(v.Client)
 	}
 	return v, nil
-}
-
-// tracksOrSource retorna a source da faixa atualmente selecionada, ou ""
-// se a lista está vazia. Usado pra rotear play/pause/next entre Connect e local.
-func tracksOrSource(tracks []api.Track) string {
-	if len(tracks) == 0 {
-		return ""
-	}
-	return tracks[0].Source
 }
 
 func (v *PlaylistView) stopLocal() {
