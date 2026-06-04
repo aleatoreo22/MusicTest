@@ -445,17 +445,26 @@ func (v *SearchView) viewInput(title string) string {
 		sourceTag = "[SoundCloud]"
 	}
 	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-	other := "[Spotify]"
-	if v.Source == sourceSpotify {
-		other = "[SoundCloud]"
+
+	header := activeStyle.Render(sourceTag)
+	if len(v.availableSources) > 1 {
+		other := "[Spotify]"
+		if v.Source == sourceSpotify {
+			other = "[SoundCloud]"
+		}
+		header = activeStyle.Render(sourceTag) + "  " + dimStyle.Render("Tab: "+other)
 	}
-	header := activeStyle.Render(sourceTag) + "  " + dimStyle.Render("Tab: "+other)
 
 	input := lipgloss.NewStyle().
 		Background(lipgloss.Color("4")).
 		Foreground(lipgloss.Color("15")).
 		Padding(0, 1).
 		Render("Search: " + v.Query + "_")
+
+	help := "Enter: Search | Esc: Back"
+	if len(v.availableSources) > 1 {
+		help = "Enter: Search | Tab: Switch source | Esc: Back"
+	}
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -464,7 +473,7 @@ func (v *SearchView) viewInput(title string) string {
 		"",
 		input,
 		"",
-		"Enter: Search | Tab: Switch source | Esc: Back",
+		help,
 	)
 }
 
@@ -518,6 +527,10 @@ func (v *SearchView) viewResults(title string) string {
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("⏸ Pausado")
 	}
 
+	help := "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  ↑/↓: Nav  Esc: Back"
+	if len(v.availableSources) > 1 {
+		help = "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  [Tab] Source  ↑/↓: Nav  Esc: Back"
+	}
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		title,
@@ -526,7 +539,7 @@ func (v *SearchView) viewResults(title string) string {
 		"",
 		status,
 		"",
-		"[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  [Tab] Source  ↑/↓: Nav  Esc: Back",
+		help,
 	)
 }
 
