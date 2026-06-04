@@ -1,0 +1,71 @@
+package api
+
+import (
+	"music-unified-backend/internal/api/handlers"
+	"music-unified-backend/internal/api/middleware"
+	"music-unified-backend/internal/providers/spotify"
+	"music-unified-backend/internal/repository"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+// SetupRouter configura as rotas da API
+func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.PlaylistRepository, musicRepo repository.MusicRepository, spotifyProv *spotify.Provider) *gin.Engine {
+	r := gin.Default()
+
+	// Handlers
+	authHandler := handlers.NewAuthHandler(userRepo)
+	playlistHandler := handlers.NewPlaylistHandler(playlistRepo)
+	spotifyHandler := handlers.NewSpotifyHandler(userRepo, spotifyProv)
+	streamHandler := handlers.NewStreamHandler(musicRepo)
+	playerHandler := handlers.NewPlayerHandler(userRepo, spotifyProv)
+
+	// Rota de saúde
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	v1 := r.Group("/api/v1")
+	{
+		auth := v1.Group("/auth")
+		{
+			auth.POST("/register", authHandler.Register)
+			auth.POST("/login", authHandler.Login)
+			auth.GET("/spotify/callback", spotifyHandler.Callback)
+		}
+
+		protected := v1.Group("/")
+		protected.Use(middleware.AuthMiddleware())
+		{
+			protected.GET("/me/profile", authHandler.GetProfile)
+			protected.GET("/auth/spotify", spotifyHandler.Login)
+			protected.GET("/auth/spotify/status", spotifyHandler.GetStatus)
+			protected.GET("/search/spotify", spotifyHandler.Search)
+
+			// Player (Spotify Connect)
+			player := protected.Group("/player")
+			{
+				player.POST("/play", playerHandler.Play)
+				player.POST("/pause", playerHandler.Pause)
+				player.POST("/next", playerHandler.Next)
+				player.POST("/previous", playerHandler.Previous)
+				player.GET("/devices", playerHandler.Devices)
+				player.GET("/currently-playing", playerHandler.CurrentlyPlaying)
+			}
+
+			// Playlists
+			playlists := protected.Group("/playlists")
+			{
+				playlists.POST("", playlistHandler.Create)
+				playlists.GET("", playlistHandler.List)
+				playlists.POST("/:id/tracks", playlistHandler.AddTrack)
+			}
+
+			// Streaming
+			protected.GET("/tracks/:id/stream", streamHandler.StreamTrack)
+		}
+	}
+
+	return r
+}
