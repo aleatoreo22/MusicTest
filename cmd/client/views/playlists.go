@@ -107,10 +107,10 @@ func (v *PlaylistView) Update(msg tea.Msg, client *api.Client) (*PlaylistView, t
 			v.SpotifyItemID = ""
 			// Pra Spotify Connect, busca a posição atual imediatamente
 			// + um poll rápido em 1s (caso o Spotify ainda esteja
-			// propagando) + repoll a cada 5s. Pra local, a posição é
-			// calculada em `localResolveMsg` (acima).
+			// propagando) + repoll a cada 5s. O tick de posição detecta
+			// o fim natural da faixa via elapsed >= duration (mais
+			// preciso que um timer wall-clock que não considera pausas).
 			return v, tea.Batch(
-				waitDurationCmd(msg.durationSec, msg.uri),
 				prefetchNextLocalCmd(v),
 				positionTickCmd(),
 				pollSpotifyPositionCmd(v.Client),
@@ -162,22 +162,35 @@ func (v *PlaylistView) Update(msg tea.Msg, client *api.Client) (*PlaylistView, t
 			positionTickCmd(),
 		)
 	case positionTickMsg:
-		// Tick periódico de 1s pra repintar a UI com posição atualizada.
-		// Se a faixa ainda está tocando, re-agenda o próximo tick. Se
-		// não (parada/trocada), deixa o tick morrer — o próximo play
-		// vai re-agendar.
-		if v.State == statePlaying && v.PlayingURI != "" {
+		// Tick periódico de 1s pra repintar a UI com posição atualizada
+		// e detectar fim natural de faixa. Re-agenda o próximo tick
+		// enquanto há algo válido pra mostrar.
+		if v.PlayingURI != "" {
 			if v.LocalPlayer != nil {
-				// Player local: posição é calculada pelo clock local
-				v.PositionSec = v.currentLocalPositionSec()
+				// Player local: posição é calculada pelo clock local.
+				// Só atualiza quando está playing (pausado congela).
+				if v.State == statePlaying {
+					v.PositionSec = v.currentLocalPositionSec()
+				}
 				return v, positionTickCmd()
 			}
 			if isConnectURI(v.PlayingURI) {
-				// Spotify Connect: interpola entre polls usando o
-				// `timestamp` que o Spotify devolve junto com progress_ms.
-				// Isso elimina o drift que vinha do PositionSec++ e
-				// mantém a posição precisa mesmo se um poll atrasar.
+				// Spotify Connect: posição interpolada via timestamp
+				// (progressMs + elapsed desde último poll). Verifica
+				// se elapsed >= duration: se sim, é fim natural de
+				// faixa → pause explícito + play da próxima.
+				//
+				// O check NÃO depende de state==playing porque o poll
+				// pode setar state=paused antes da posição chegar no
+				// fim (Spotify reporta is_playing=false com
+				// progressMs ainda < durationMs em alguns casos de
+				// race). Confiamos no elapsed >= duration como sinal
+				// autoritativo de "faixa acabou".
 				v.PositionSec = v.currentSpotifyPositionSec()
+				dur := v.spotifyCurrentTrackDurationSec()
+				if dur > 0 && v.PositionSec >= dur {
+					return v, v.spotifyAutoAdvanceCmd()
+				}
 				return v, positionTickCmd()
 			}
 		}
@@ -486,6 +499,53 @@ func (v *PlaylistView) currentSpotifyPositionSec() int {
 	elapsedMs := time.Since(v.SpotifyLastPollAt).Milliseconds()
 	totalMs := v.SpotifyLastProgressMs + int(elapsedMs)
 	return totalMs / 1000
+}
+
+// spotifyCurrentTrackDurationSec retorna a duração (em segundos) da
+// faixa atual do Spotify Connect. Prioriza a duração vinda do
+// /currently-playing (SpotifyItemDurationMs, que é a duração real
+// reportada pelo Spotify); se ainda não temos poll, cai pra
+// duração da faixa no playlist. Retorna 0 se nenhuma fonte tiver.
+func (v *PlaylistView) spotifyCurrentTrackDurationSec() int {
+	if v.SpotifyItemDurationMs > 0 {
+		return v.SpotifyItemDurationMs / 1000
+	}
+	for _, t := range v.currentTracks() {
+		if playingURIFor(t) == v.PlayingURI {
+			return t.Duration
+		}
+	}
+	return 0
+}
+
+// spotifyAutoAdvanceCmd é disparado pelo tick de posição quando
+// detecta que a faixa do Spotify Connect chegou no fim (elapsed >=
+// duration). Faz pause explícito do Connect + play da próxima
+// faixa da playlist. Se for a última faixa, só pausa e seta
+// state=stopped.
+//
+// A sequência pause→play é feita num único tea.Cmd (não em batch)
+// pra evitar que a UI mostre um estado "paused" intermediário
+// entre as duas chamadas.
+func (v *PlaylistView) spotifyAutoAdvanceCmd() tea.Cmd {
+	tracks := v.currentTracks()
+	nextIdx := v.TracksSelected + 1
+	if nextIdx >= len(tracks) {
+		// Última faixa: pausa Spotify e limpa estado.
+		v.State = stateStopped
+		v.PlayingURI = ""
+		return pauseCmd(v.Client)
+	}
+	track := tracks[nextIdx]
+	v.TracksSelected = nextIdx
+	v.Pending = true
+	v.PlayerErr = ""
+	v.PlayingURI = playingURIFor(track)
+
+	if isConnectSource(track.Source) {
+		return pauseAndPlayConnectCmd(v.Client, track)
+	}
+	return pauseAndResolveLocalCmd(v.Client, track)
 }
 
 // playTrackAt inicia a faixa no índice `idx` da playlist atual, fazendo

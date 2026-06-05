@@ -251,6 +251,39 @@ func seekCmd(client *api.Client, positionMs int, deltaSec int) tea.Cmd {
 	}
 }
 
+// pauseAndPlayConnectCmd faz pause explícito do Spotify Connect +
+// Play do track especificado, sequencialmente numa única Cmd.
+// Usado pelo auto-advance quando a faixa atual do Connect chega
+// no fim (elapsed >= duration): garante que a faixa atual é parada
+// antes da próxima ser iniciada. Retorna playResultMsg com
+// state=playing, sem estado intermediário "paused" visível.
+func pauseAndPlayConnectCmd(client *api.Client, track api.Track) tea.Cmd {
+	uri := "spotify:track:" + track.SourceID
+	return func() tea.Msg {
+		_ = client.Pause()
+		err := client.PlayTrack(uri, "")
+		if err != nil {
+			return playResultMsg{err: err}
+		}
+		return playResultMsg{uri: uri, newState: statePlaying, durationSec: track.Duration}
+	}
+}
+
+// pauseAndResolveLocalCmd faz pause explícito do Spotify Connect +
+// resolve a stream URL do próximo track (local: SoundCloud/YouTube)
+// + devolve localResolveMsg pra iniciar o player local. Sequencial
+// numa única Cmd.
+func pauseAndResolveLocalCmd(client *api.Client, track api.Track) tea.Cmd {
+	return func() tea.Msg {
+		_ = client.Pause()
+		url, err := client.GetStreamURL(track.Source, track.SourceID)
+		if err != nil {
+			return simpleResultMsg{op: "pause_and_resolve", err: err}
+		}
+		return localResolveMsg{track: track, stream: url, startSec: 0}
+	}
+}
+
 // isConnectURI retorna true pra URIs que tocam via Spotify Connect
 // (formato "spotify:track:<id>"). Demais (soundcloud:/youtube:) usam
 // player local.
