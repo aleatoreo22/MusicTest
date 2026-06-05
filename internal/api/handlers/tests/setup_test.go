@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"music-unified-backend/internal/api"
+	"music-unified-backend/internal/config"
 	"music-unified-backend/internal/models"
 	"music-unified-backend/internal/providers/soundcloud"
 	"music-unified-backend/internal/providers/spotify"
@@ -24,9 +25,14 @@ func setupTestRouter() (*gin.Engine, repository.UserRepository, repository.Playl
 	playlistRepo := repository.NewGormPlaylistRepository(db)
 	musicRepo := repository.NewGormMusicRepository(db)
 
-	spotifyProv := spotify.NewProvider()
-	soundcloudProv := soundcloud.NewProvider()
-	youtubeProv := youtube.NewProvider()
+	// Cria providers com config fake (Passo 18 vai refinar com config real).
+	cfg := config.Config{
+		Spotify:    config.SpotifyConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://test/cb"},
+		SoundCloud: config.SoundCloudConfig{ClientID: "test", ClientSecret: "test"},
+	}
+	spotifyProv := spotify.NewProvider(cfg.Spotify)
+	soundcloudProv := soundcloud.NewProvider(cfg.SoundCloud)
+	youtubeProv := youtube.NewProvider(cfg.YouTube)
 
 	r := api.SetupRouter(userRepo, playlistRepo, musicRepo, spotifyProv, soundcloudProv, youtubeProv)
 
