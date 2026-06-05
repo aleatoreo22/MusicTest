@@ -1,16 +1,13 @@
 package handlers
 
 import (
-	"errors"
-	"log"
 	"music-unified-backend/internal/providers/spotify"
 	"music-unified-backend/internal/repository"
-	"net/http"
+	"music-unified-backend/pkg/httputil"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	spotifyapi "github.com/zmb3/spotify/v2"
-	"golang.org/x/oauth2"
 )
 
 type PlayerHandler struct {
@@ -28,38 +25,38 @@ type PlayRequest struct {
 }
 
 type SeekRequest struct {
-	PositionMs int `json:"position_ms"`
+	PositionMs int    `json:"position_ms"`
 	DeviceID   string `json:"device_id,omitempty"`
 }
 
-func (h *PlayerHandler) client(c *gin.Context) (*spotifyapi.Client, error) {
-	userID, _ := c.Get("userID")
-	user, err := h.userRepo.FindByID(userID.(uint))
+// spotifyClient resolve o client do Spotify para o usuário autenticado.
+// Retorna (nil, false) se o client não pôde ser obtido — nesse caso o
+// handler já respondeu com o erro apropriado.
+func (h *PlayerHandler) spotifyClient(c *gin.Context) (*spotifyapi.Client, bool) {
+	userID, ok := httputil.MustUserID(c)
+	if !ok {
+		return nil, false
+	}
+	user, err := h.userRepo.FindByID(userID)
 	if err != nil {
-		return nil, err
+		httputil.Error(c, httputil.NotFound("Usuário não encontrado"))
+		return nil, false
 	}
 	if user.SpotifyAccessToken == "" {
-		return nil, errors.New("spotify não vinculado")
+		httputil.Error(c, httputil.Unauthorized("spotify não vinculado"))
+		return nil, false
 	}
-	token := &oauth2.Token{
-		AccessToken:  user.SpotifyAccessToken,
-		RefreshToken: user.SpotifyRefreshToken,
-		Expiry:       user.SpotifyTokenExpiry,
-		TokenType:    "Bearer",
-	}
-	return h.provider.GetClient(c.Request.Context(), token), nil
+	return h.provider.GetClient(c.Request.Context(), userToToken(user)), true
 }
 
 func (h *PlayerHandler) Play(c *gin.Context) {
 	var req PlayRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
-
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+	cli, ok := h.spotifyClient(c)
+	if !ok {
 		return
 	}
 
@@ -71,141 +68,123 @@ func (h *PlayerHandler) Play(c *gin.Context) {
 		id := spotifyapi.ID(req.DeviceID)
 		opt.DeviceID = &id
 	}
-
 	if err := cli.PlayOpt(c.Request.Context(), opt); err != nil {
-		status, msg := classifySpotifyErr(err)
-		c.JSON(status, gin.H{"error": msg})
+		httputil.Error(c, classifySpotifyErr(err))
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"ok": true, "uri": req.URI})
+	httputil.JSON(c, 200, gin.H{"ok": true, "uri": req.URI})
 }
 
 func (h *PlayerHandler) Pause(c *gin.Context) {
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+	cli, ok := h.spotifyClient(c)
+	if !ok {
 		return
 	}
 	if err := cli.Pause(c.Request.Context()); err != nil {
 		// Cleanup do TUI no Ctrl+C: best-effort, nunca falha. Erros
 		// "no active device", "premium required", token expirado são
-		// todos no-op pra finalidade de "garantir que parou". Logamos
-		// server-side mas respondemos 200.
+		// todos no-op pra finalidade de "garantir que parou". Respondemos
+		// 200 direto nesse caso.
 		if c.Query("cleanup") == "1" {
-			log.Printf("player/pause (cleanup) ignorou erro: %v", err)
-			c.JSON(http.StatusOK, gin.H{"ok": true})
+			httputil.JSON(c, 200, gin.H{"ok": true})
 			return
 		}
-		status, msg := classifySpotifyErr(err)
-		c.JSON(status, gin.H{"error": msg})
+		httputil.Error(c, classifySpotifyErr(err))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	httputil.JSON(c, 200, gin.H{"ok": true})
 }
 
 func (h *PlayerHandler) Next(c *gin.Context) {
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-	if err := cli.Next(c.Request.Context()); err != nil {
-		status, msg := classifySpotifyErr(err)
-		c.JSON(status, gin.H{"error": msg})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	h.playerSimple(c, func(cli *spotifyapi.Client) error { return cli.Next(c.Request.Context()) })
 }
 
 func (h *PlayerHandler) Previous(c *gin.Context) {
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-	if err := cli.Previous(c.Request.Context()); err != nil {
-		status, msg := classifySpotifyErr(err)
-		c.JSON(status, gin.H{"error": msg})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	h.playerSimple(c, func(cli *spotifyapi.Client) error { return cli.Previous(c.Request.Context()) })
 }
 
-// Seek move a posição de reprodução do Spotify Connect pra `req.PositionMs`
-// (em milissegundos, relativo ao início da faixa atual). Usado pelo TUI
-// pra sincronizar a posição depois de um seek local. Se o position_ms
-// passar da duração da faixa, o Spotify pula pra próxima automaticamente.
+// playerSimple é o helper para ações do player que não precisam de
+// body nem parâmetros — todas elas têm a mesma estrutura: pegar
+// client, executar ação, classificar erro.
+func (h *PlayerHandler) playerSimple(c *gin.Context, action func(*spotifyapi.Client) error) {
+	cli, ok := h.spotifyClient(c)
+	if !ok {
+		return
+	}
+	if err := action(cli); err != nil {
+		httputil.Error(c, classifySpotifyErr(err))
+		return
+	}
+	httputil.JSON(c, 200, gin.H{"ok": true})
+}
+
+// Seek move a posição de reprodução do Spotify Connect para
+// req.PositionMs (ms, relativo ao início da faixa). Se passar da
+// duração, o Spotify pula pra próxima automaticamente.
 func (h *PlayerHandler) Seek(c *gin.Context) {
 	var req SeekRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
 	if req.PositionMs < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "position_ms deve ser >= 0"})
+		httputil.Error(c, httputil.BadRequest("position_ms deve ser >= 0"))
 		return
 	}
-
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+	cli, ok := h.spotifyClient(c)
+	if !ok {
 		return
 	}
-
 	opt := &spotifyapi.PlayOptions{}
 	if req.DeviceID != "" {
 		id := spotifyapi.ID(req.DeviceID)
 		opt.DeviceID = &id
 	}
 	if err := cli.SeekOpt(c.Request.Context(), req.PositionMs, opt); err != nil {
-		status, msg := classifySpotifyErr(err)
-		c.JSON(status, gin.H{"error": msg})
+		httputil.Error(c, classifySpotifyErr(err))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "position_ms": req.PositionMs})
+	httputil.JSON(c, 200, gin.H{"ok": true, "position_ms": req.PositionMs})
 }
 
 func (h *PlayerHandler) Devices(c *gin.Context) {
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+	cli, ok := h.spotifyClient(c)
+	if !ok {
 		return
 	}
 	devs, err := cli.PlayerDevices(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.Internal(err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, devs)
+	httputil.JSON(c, 200, devs)
 }
 
 // PlaybackSnapshotFlat é a projeção do CurrentlyPlaying do Spotify SDK
-// pros campos que o TUI usa pra sincronizar. Retornamos um objeto flat
-// (em vez do SDK completo) pra evitar dependência de JSON tags internos
-// do zmb3/spotify e pra dar nomes mais claros no contrato HTTP.
+// para os campos que o TUI usa. Retornamos flat (em vez do SDK completo)
+// para evitar dependência de JSON tags internos do zmb3/spotify e
+// dar nomes mais claros no contrato HTTP.
 type PlaybackSnapshotFlat struct {
-	IsPlaying       bool   `json:"is_playing"`
-	ProgressMs      int    `json:"progress_ms"`
-	Timestamp       int64  `json:"timestamp"`
-	URI             string `json:"uri"`
-	ItemID          string `json:"item_id,omitempty"`
-	ItemDurationMs  int    `json:"item_duration_ms,omitempty"`
+	IsPlaying      bool   `json:"is_playing"`
+	ProgressMs     int    `json:"progress_ms"`
+	Timestamp      int64  `json:"timestamp"`
+	URI            string `json:"uri"`
+	ItemID         string `json:"item_id,omitempty"`
+	ItemDurationMs int    `json:"item_duration_ms,omitempty"`
 }
 
 func (h *PlayerHandler) CurrentlyPlaying(c *gin.Context) {
-	cli, err := h.client(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+	cli, ok := h.spotifyClient(c)
+	if !ok {
 		return
 	}
 	cp, err := cli.PlayerCurrentlyPlaying(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.Internal(err.Error()))
 		return
 	}
 	if cp == nil {
-		c.JSON(http.StatusOK, gin.H{"is_playing": false})
+		httputil.JSON(c, 200, gin.H{"is_playing": false})
 		return
 	}
 	resp := PlaybackSnapshotFlat{
@@ -218,18 +197,30 @@ func (h *PlayerHandler) CurrentlyPlaying(c *gin.Context) {
 		resp.ItemID = string(cp.Item.ID)
 		resp.ItemDurationMs = int(cp.Item.Duration)
 	}
-	c.JSON(http.StatusOK, resp)
+	httputil.JSON(c, 200, resp)
 }
 
-func classifySpotifyErr(err error) (int, string) {
+// classifySpotifyErr converte erros do Spotify em status HTTP. Faz
+// string matching nas mensagens (a API não retorna tipos estruturados
+// em todos os casos). TODO: usar erros tipados do SDK quando possível.
+func classifySpotifyErr(err error) *httputil.APIError {
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "404"), strings.Contains(msg, "No active device"), strings.Contains(msg, "device not found"):
-		return http.StatusNotFound, "Nenhum device do Spotify ativo. Abra o Spotify em algum device (celular, desktop ou web player) e tente novamente."
-	case strings.Contains(msg, "403"), strings.Contains(msg, "Premium required"):
-		return http.StatusForbidden, "Spotify Premium é necessário para controlar a reprodução remotamente."
+	case containsAny(msg, "404", "No active device", "device not found"):
+		return httputil.NotFound("Nenhum device do Spotify ativo. Abra o Spotify em algum device (celular, desktop ou web player) e tente novamente.")
+	case containsAny(msg, "403", "Premium required"):
+		return httputil.Forbidden("Spotify Premium é necessário para controlar a reprodução remotamente.")
 	case strings.Contains(msg, "401"):
-		return http.StatusUnauthorized, "Token do Spotify expirou. Revincule sua conta."
+		return httputil.Unauthorized("Token do Spotify expirou. Revincule sua conta.")
 	}
-	return http.StatusInternalServerError, msg
+	return httputil.Internal(msg)
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
