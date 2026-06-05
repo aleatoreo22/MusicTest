@@ -9,46 +9,49 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"music-unified-backend/internal/config"
 	"music-unified-backend/internal/models"
 )
 
 const (
-	tokenURL    = "https://secure.soundcloud.com/oauth/token"
-	apiBase     = "https://api.soundcloud.com"
-	defaultUA   = "Mozilla/5.0 (compatible; MusicUnifiedBackend/1.0)"
+	tokenURL  = "https://secure.soundcloud.com/oauth/token"
+	apiBase   = "https://api.soundcloud.com"
+	defaultUA = "Mozilla/5.0 (compatible; MusicUnifiedBackend/1.0)"
+	name      = "soundcloud"
 )
 
+// Provider implementa a interface comum de providers para o SoundCloud.
+// Usa o fluxo client_credentials para obter um token de aplicação e
+// busca/resolve URLs HLS para streaming off-platform.
 type Provider struct {
-	clientID     string
-	clientSecret string
-	http         *http.Client
+	cfg  config.SoundCloudConfig
+	http *http.Client
 
 	mu          sync.Mutex
 	accessToken string
 	tokenExpiry time.Time
 }
 
-func NewProvider() *Provider {
+var (
+	ErrNotConfigured = errors.New("soundcloud: SOUNDCLOUD_CLIENT_ID/SECRET não configurados")
+	ErrBlocked       = errors.New("soundcloud: faixa bloqueada/indisponível para streaming off-platform")
+)
+
+func NewProvider(cfg config.SoundCloudConfig) *Provider {
 	return &Provider{
-		clientID:     os.Getenv("SOUNDCLOUD_CLIENT_ID"),
-		clientSecret: os.Getenv("SOUNDCLOUD_CLIENT_SECRET"),
-		http:         &http.Client{Timeout: 15 * time.Second},
+		cfg:  cfg,
+		http: &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
-func (p *Provider) Enabled() bool {
-	return p.clientID != "" && p.clientSecret != "" &&
-		p.clientID != "seu_client_id_aqui"
-}
+func (p *Provider) Name() string { return name }
 
-var ErrNotConfigured = errors.New("soundcloud: SOUNDCLOUD_CLIENT_ID/SECRET não configurados")
-var ErrBlocked = errors.New("soundcloud: faixa bloqueada/indisponível para streaming off-platform")
+func (p *Provider) Enabled() bool { return p.cfg.IsConfigured() }
 
 type tokenResponse struct {
 	AccessToken string `json:"access_token"`
@@ -74,7 +77,7 @@ func (p *Provider) token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	auth := p.clientID + ":" + p.clientSecret
+	auth := p.cfg.ClientID + ":" + p.cfg.ClientSecret
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json; charset=utf-8")
@@ -121,17 +124,17 @@ func (p *Provider) authed(ctx context.Context, method, endpoint string, body io.
 }
 
 type scTrack struct {
-	ID            int64  `json:"id"`
-	URN           string `json:"urn"`
-	Title         string `json:"title"`
-	Duration      int    `json:"duration"` // ms
-	ArtworkURL    string `json:"artwork_url"`
-	User          struct {
+	ID         int64  `json:"id"`
+	URN        string `json:"urn"`
+	Title      string `json:"title"`
+	Duration   int    `json:"duration"` // ms
+	ArtworkURL string `json:"artwork_url"`
+	User       struct {
 		Username string `json:"username"`
 	} `json:"user"`
-	Streamable  bool `json:"streamable"`
-	Policy      string `json:"policy"`
-	Access      string `json:"access"`
+	Streamable   bool   `json:"streamable"`
+	Policy       string `json:"policy"`
+	Access       string `json:"access"`
 	EmbeddableBy string `json:"embeddable_by"`
 }
 
@@ -139,6 +142,8 @@ type scSearchResponse struct {
 	Collection []scTrack `json:"collection"`
 }
 
+// Search implementa a interface providers.Provider. limit fora do
+// intervalo [1,50] é normalizado para 20.
 func (p *Provider) Search(ctx context.Context, query string, limit int) ([]models.Track, error) {
 	if !p.Enabled() {
 		return nil, ErrNotConfigured
@@ -169,15 +174,11 @@ func (p *Provider) Search(ctx context.Context, query string, limit int) ([]model
 		if t.Policy == "BLOCK" || t.Access == "blocked" || !t.Streamable {
 			continue
 		}
-		durationSec := t.Duration / 1000
-		thumbnail := t.ArtworkURL
-		if thumbnail != "" {
-			thumbnail = strings.Replace(thumbnail, "-large", "-t500x500", 1)
-		}
+		thumbnail := strings.Replace(t.ArtworkURL, "-large", "-t500x500", 1)
 		out = append(out, models.Track{
 			Title:     t.Title,
 			Artist:    t.User.Username,
-			Duration:  durationSec,
+			Duration:  t.Duration / 1000,
 			Thumbnail: thumbnail,
 			Source:    models.SourceSoundCloud,
 			SourceID:  strconv.FormatInt(t.ID, 10),
@@ -187,10 +188,10 @@ func (p *Provider) Search(ctx context.Context, query string, limit int) ([]model
 }
 
 type scStreamsResponse struct {
-	HlsAAC160     string `json:"hls_aac_160_url"`
-	HlsAAC96      string `json:"hls_aac_96_url"`
-	HlsMP3        string `json:"hls_mp3_128_url"`
-	PreviewMP3    string `json:"preview_mp3_128_url"`
+	HlsAAC160  string `json:"hls_aac_160_url"`
+	HlsAAC96   string `json:"hls_aac_96_url"`
+	HlsMP3     string `json:"hls_mp3_128_url"`
+	PreviewMP3 string `json:"preview_mp3_128_url"`
 }
 
 func (p *Provider) Streams(ctx context.Context, trackID string) (*scStreamsResponse, error) {
@@ -216,20 +217,14 @@ func (p *Provider) Streams(ctx context.Context, trackID string) (*scStreamsRespo
 	return &sr, nil
 }
 
-// Stream resolve a URL final de áudio reproduzível (HLS) para uma faixa.
-// Faz o segundo passo autenticado para extrair o Location do 302.
+// Stream resolve a URL final reproduzível (HLS) para uma faixa. Faz
+// o segundo passo autenticado para extrair o Location do 302.
 func (p *Provider) Stream(ctx context.Context, trackID string) (string, time.Time, error) {
 	streams, err := p.Streams(ctx, trackID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	candidate := streams.HlsAAC160
-	if candidate == "" {
-		candidate = streams.HlsAAC96
-	}
-	if candidate == "" {
-		candidate = streams.HlsMP3
-	}
+	candidate := firstNonEmpty(streams.HlsAAC160, streams.HlsAAC96, streams.HlsMP3)
 	if candidate == "" {
 		return "", time.Time{}, errors.New("soundcloud: nenhum stream disponível para esta faixa")
 	}
@@ -257,12 +252,19 @@ func (p *Provider) Stream(ctx context.Context, trackID string) (string, time.Tim
 	defer resp.Body.Close()
 	if loc := resp.Header.Get("Location"); loc != "" {
 		expires := time.Now().Add(5 * time.Minute)
-		if resp.Header.Get("Expires") != "" {
-			if t, err := http.ParseTime(resp.Header.Get("Expires")); err == nil {
-				expires = t
-			}
+		if t, err := http.ParseTime(resp.Header.Get("Expires")); err == nil {
+			expires = t
 		}
 		return loc, expires, nil
 	}
 	return "", time.Time{}, fmt.Errorf("soundcloud: sem header Location na resposta (status %d)", resp.StatusCode)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

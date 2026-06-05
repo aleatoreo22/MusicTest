@@ -25,9 +25,9 @@ func main() {
 		log.Fatalf("erro ao conectar ao banco: %v", err)
 	}
 
-	spotifyProv := spotify.NewProvider()
-	soundcloudProv := soundcloud.NewProvider()
-	youtubeProv := youtube.NewProvider()
+	spotifyProv := spotify.NewProvider(cfg.Spotify)
+	soundcloudProv := soundcloud.NewProvider(cfg.SoundCloud)
+	youtubeProv := youtube.NewProvider(cfg.YouTube)
 
 	userRepo := repository.NewGormUserRepository(db)
 	playlistRepo := repository.NewGormPlaylistRepository(db)

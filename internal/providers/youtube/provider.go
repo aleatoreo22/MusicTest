@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"music-unified-backend/internal/config"
 	"music-unified-backend/internal/models"
 )
 
@@ -69,11 +70,11 @@ const (
 
 // NewProvider detecta yt-dlp no PATH. Falha silenciosa se não estiver —
 // Enabled() retornará false e o provider não aparece na listagem.
-func NewProvider() *Provider {
+func NewProvider(cfg config.YouTubeConfig) *Provider {
 	path, _ := exec.LookPath("yt-dlp")
 	return &Provider{
 		ytDlpPath:   path,
-		cookiesFile: strings.TrimSpace(os.Getenv("YOUTUBE_COOKIES_FILE")),
+		cookiesFile: strings.TrimSpace(cfg.CookiesFile),
 		format:      "bestaudio[ext=m4a]/bestaudio/best",
 		cache: &searchCache{
 			data: make(map[string]searchCacheEntry),
