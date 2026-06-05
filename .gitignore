@@ -1,0 +1,49 @@
+# ===== Backend Go =====
+backend/music-api
+backend/music-client
+backend/music.db
+backend/test.db
+backend/.env
+
+# ===== Mobile Flutter =====
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/.pub-cache/
+mobile/.pub/
+mobile/build/
+mobile/.idea/
+mobile/.vscode/
+mobile/android/.gradle/
+mobile/android/app/debug/
+mobile/android/app/profile/
+mobile/android/app/release/
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/android/**/GeneratedPluginRegistrant.java
+mobile/android/captures/
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/Flutter.framework
+mobile/ios/Flutter/Flutter.podspec
+mobile/linux/flutter/
+mobile/linux/build/
+mobile/macos/Flutter/ephemeral/
+mobile/macos/Pods/
+mobile/macos/build/
+mobile/web/
+mobile/windows/flutter/
+mobile/windows/build/
+mobile/.fvm/
+mobile/**/doc/api/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+*.swp
