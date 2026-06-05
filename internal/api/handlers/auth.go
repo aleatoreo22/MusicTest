@@ -3,8 +3,8 @@ package handlers
 import (
 	"music-unified-backend/internal/models"
 	"music-unified-backend/internal/repository"
+	"music-unified-backend/pkg/httputil"
 	"music-unified-backend/pkg/utils"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,73 +20,69 @@ func NewAuthHandler(repo repository.UserRepository) *AuthHandler {
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req models.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
 
-	hashedPassword, err := utils.HashPassword(req.Password)
+	hashed, err := utils.HashPassword(req.Password)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao processar senha"})
+		httputil.Error(c, httputil.Internal("Erro ao processar senha"))
 		return
 	}
 
-	newUser := models.User{
-		Email:    req.Email,
-		Password: hashedPassword,
-	}
-
-	if err := h.userRepo.Create(&newUser); err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Usuário já existe ou erro no banco"})
+	user := &models.User{Email: req.Email, Password: hashed}
+	if err := h.userRepo.Create(user); err != nil {
+		httputil.Error(c, httputil.Conflict("Usuário já existe ou erro no banco"))
 		return
 	}
 
-	token, err := utils.GenerateToken(newUser.ID)
+	token, err := utils.GenerateToken(user.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao gerar token"})
+		httputil.Error(c, httputil.Internal("Erro ao gerar token"))
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	httputil.JSON(c, 201, gin.H{
 		"message": "Usuário criado com sucesso",
 		"token":   token,
 		"type":    "Bearer",
-		"user_id": newUser.ID,
+		"user_id": user.ID,
 	})
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
 
 	user, err := h.userRepo.FindByEmail(req.Email)
 	if err != nil || !utils.CheckPasswordHash(req.Password, user.Password) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Credenciais inválidas"})
+		httputil.Error(c, httputil.Unauthorized("Credenciais inválidas"))
 		return
 	}
 
 	token, err := utils.GenerateToken(user.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao gerar token"})
+		httputil.Error(c, httputil.Internal("Erro ao gerar token"))
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token": token,
-		"type":  "Bearer",
-	})
+	httputil.JSON(c, 200, gin.H{"token": token, "type": "Bearer"})
 }
 
 func (h *AuthHandler) GetProfile(c *gin.Context) {
-	userID, _ := c.Get("userID")
-	
-	user, err := h.userRepo.FindByID(userID.(uint))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Usuário não encontrado"})
+	userID, ok := httputil.MustUserID(c)
+	if !ok {
 		return
 	}
 
-	c.JSON(http.StatusOK, user)
+	user, err := h.userRepo.FindByID(userID)
+	if err != nil {
+		httputil.Error(c, httputil.NotFound("Usuário não encontrado"))
+		return
+	}
+
+	httputil.JSON(c, 200, user)
 }
