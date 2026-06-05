@@ -2,19 +2,21 @@ package handlers
 
 import (
 	"music-unified-backend/internal/models"
-	"music-unified-backend/internal/repository"
+	"music-unified-backend/internal/service"
 	"music-unified-backend/pkg/httputil"
-	"music-unified-backend/pkg/utils"
 
 	"github.com/gin-gonic/gin"
 )
 
+// AuthHandler é um wrapper fino sobre AuthService. Sua única
+// responsabilidade é parsear HTTP, delegar ao service, e
+// formatar a resposta.
 type AuthHandler struct {
-	userRepo repository.UserRepository
+	auth *service.AuthService
 }
 
-func NewAuthHandler(repo repository.UserRepository) *AuthHandler {
-	return &AuthHandler{userRepo: repo}
+func NewAuthHandler(auth *service.AuthService) *AuthHandler {
+	return &AuthHandler{auth: auth}
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -23,30 +25,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
-
-	hashed, err := utils.HashPassword(req.Password)
-	if err != nil {
-		httputil.Error(c, httputil.Internal("Erro ao processar senha"))
+	res, apiErr := h.auth.Register(req)
+	if apiErr != nil {
+		httputil.Error(c, apiErr)
 		return
 	}
-
-	user := &models.User{Email: req.Email, Password: hashed}
-	if err := h.userRepo.Create(user); err != nil {
-		httputil.Error(c, httputil.Conflict("Usuário já existe ou erro no banco"))
-		return
-	}
-
-	token, err := utils.GenerateToken(user.ID)
-	if err != nil {
-		httputil.Error(c, httputil.Internal("Erro ao gerar token"))
-		return
-	}
-
 	httputil.JSON(c, 201, gin.H{
 		"message": "Usuário criado com sucesso",
-		"token":   token,
+		"token":   res.Token,
 		"type":    "Bearer",
-		"user_id": user.ID,
+		"user_id": res.User.ID,
 	})
 }
 
@@ -56,20 +44,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
-
-	user, err := h.userRepo.FindByEmail(req.Email)
-	if err != nil || !utils.CheckPasswordHash(req.Password, user.Password) {
-		httputil.Error(c, httputil.Unauthorized("Credenciais inválidas"))
+	res, apiErr := h.auth.Login(req)
+	if apiErr != nil {
+		httputil.Error(c, apiErr)
 		return
 	}
-
-	token, err := utils.GenerateToken(user.ID)
-	if err != nil {
-		httputil.Error(c, httputil.Internal("Erro ao gerar token"))
-		return
-	}
-
-	httputil.JSON(c, 200, gin.H{"token": token, "type": "Bearer"})
+	httputil.JSON(c, 200, gin.H{"token": res.Token, "type": "Bearer"})
 }
 
 func (h *AuthHandler) GetProfile(c *gin.Context) {
@@ -77,12 +57,10 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 	if !ok {
 		return
 	}
-
-	user, err := h.userRepo.FindByID(userID)
-	if err != nil {
-		httputil.Error(c, httputil.NotFound("Usuário não encontrado"))
+	user, apiErr := h.auth.GetProfile(userID)
+	if apiErr != nil {
+		httputil.Error(c, apiErr)
 		return
 	}
-
 	httputil.JSON(c, 200, user)
 }

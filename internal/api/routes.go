@@ -8,6 +8,7 @@ import (
 	"music-unified-backend/internal/providers/spotify"
 	"music-unified-backend/internal/providers/youtube"
 	"music-unified-backend/internal/repository"
+	"music-unified-backend/internal/service"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -35,7 +36,8 @@ func SetupRouter(
 	r.Use(gin.Logger(), gin.Recovery())
 
 	// Handlers
-	authHandler := handlers.NewAuthHandler(userRepo)
+	authSvc := service.NewAuthService(userRepo)
+	authHandler := handlers.NewAuthHandler(authSvc)
 	playlistHandler := handlers.NewPlaylistHandler(playlistRepo)
 	spotifyHandler := handlers.NewSpotifyHandler(userRepo, spotifyProv)
 	streamHandler := handlers.NewStreamHandler(musicRepo)

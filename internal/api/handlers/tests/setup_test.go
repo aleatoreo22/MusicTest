@@ -25,7 +25,9 @@ func setupTestRouter() (*gin.Engine, repository.UserRepository, repository.Playl
 	playlistRepo := repository.NewGormPlaylistRepository(db)
 	musicRepo := repository.NewGormMusicRepository(db)
 
-	// Cria providers com config fake (Passo 18 vai refinar com config real).
+	// Cria providers com config fake — Enabled() retorna false
+	// (valores "test" não passam no isPlaceholder, mas os métodos
+	// não fazem chamada de rede real no setup).
 	cfg := config.Config{
 		Spotify:    config.SpotifyConfig{ClientID: "test", ClientSecret: "test", RedirectURL: "http://test/cb"},
 		SoundCloud: config.SoundCloudConfig{ClientID: "test", ClientSecret: "test"},
