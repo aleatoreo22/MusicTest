@@ -16,6 +16,7 @@ import (
 type Player struct {
 	cmd     *exec.Cmd
 	mu      sync.Mutex
+	done    chan struct{}
 	backend string
 }
 
@@ -55,7 +56,10 @@ func AvailablePlayer() string {
 
 var ErrNoPlayer = errors.New("nenhum player de áudio disponível (instale mpv, ffplay ou vlc)")
 
-func Play(url string) (*Player, error) {
+// Play inicia a reprodução de uma URL. startSec >= 0 indica a posição (em
+// segundos) onde o player deve começar — usado pra retomar de onde parou.
+// Quando startSec > 0, passa --start=<sec> (ou equivalente) pro backend.
+func Play(url string, startSec int) (*Player, error) {
 	if url == "" {
 		return nil, errors.New("URL vazia")
 	}
@@ -73,7 +77,7 @@ func Play(url string) (*Player, error) {
 	}
 
 	bin := backends[0]
-	args := argsFor(bin, url)
+	args := argsFor(bin, url, startSec)
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -83,7 +87,7 @@ func Play(url string) (*Player, error) {
 		return nil, fmt.Errorf("falha ao iniciar %s: %w", bin, err)
 	}
 
-	p := &Player{cmd: cmd, backend: bin}
+	p := &Player{cmd: cmd, backend: bin, done: make(chan struct{})}
 
 	playerMu.Lock()
 	active = p
@@ -94,15 +98,30 @@ func Play(url string) (*Player, error) {
 	return p, nil
 }
 
-func argsFor(bin, url string) []string {
+func argsFor(bin, url string, startSec int) []string {
 	base := filepath.Base(bin)
 	switch base {
 	case "mpv":
-		return []string{"--no-terminal", "--quiet", "--no-video", "--really-quiet", url}
+		args := []string{"--no-terminal", "--quiet", "--no-video", "--really-quiet"}
+		if startSec > 0 {
+			args = append(args, fmt.Sprintf("--start=%d", startSec))
+		}
+		args = append(args, url)
+		return args
 	case "ffplay":
-		return []string{"-nodisp", "-loglevel", "quiet", "-hide_banner", "-autoexit", url}
+		args := []string{"-nodisp", "-loglevel", "quiet", "-hide_banner", "-autoexit"}
+		if startSec > 0 {
+			args = append(args, "-ss", fmt.Sprintf("%d", startSec))
+		}
+		args = append(args, url)
+		return args
 	case "vlc", "cvlc":
-		return []string{"--intf", "dummy", "--play-and-exit", "--no-video", url}
+		args := []string{"--intf", "dummy", "--play-and-exit", "--no-video"}
+		if startSec > 0 {
+			args = append(args, "--start-time", fmt.Sprintf("%d", startSec))
+		}
+		args = append(args, url)
+		return args
 	}
 	return []string{url}
 }
@@ -134,6 +153,11 @@ func (p *Player) stopLocked() error {
 
 func (p *Player) wait() {
 	_ = p.cmd.Wait()
+	close(p.done)
+}
+
+func (p *Player) Done() <-chan struct{} {
+	return p.done
 }
 
 func StopActive() {

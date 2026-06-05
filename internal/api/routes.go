@@ -60,6 +60,7 @@ func SetupRouter(userRepo repository.UserRepository, playlistRepo repository.Pla
 				player.POST("/pause", playerHandler.Pause)
 				player.POST("/next", playerHandler.Next)
 				player.POST("/previous", playerHandler.Previous)
+				player.POST("/seek", playerHandler.Seek)
 				player.GET("/devices", playerHandler.Devices)
 				player.GET("/currently-playing", playerHandler.CurrentlyPlaying)
 			}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"music-unified-backend/cmd/client/api"
 	"music-unified-backend/pkg/utils"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,8 +32,26 @@ type SearchView struct {
 	width      int
 
 	// Local playback (mpv) para SoundCloud e fontes que não usam Connect
-	LocalPlayer *utils.Player
-	LocalURL    string
+	LocalPlayer   *utils.Player
+	LocalURL      string
+	LocalStartSec int       // posição (em segundos) onde o player local começou
+	LocalStartedAt time.Time // quando o player local iniciou (pra PositionSec)
+
+	// PositionSec é o tempo decorrido da faixa atual (em segundos),
+	// atualizado em cada Tick. Pra Spotify Connect vem do
+	// (SpotifyLastProgressMs + (now - SpotifyLastPollAt)) / 1000 — sem
+	// acumulação de drift. Pra local é calculado a partir de
+	// LocalStartSec + (now - LocalStartedAt).
+	PositionSec int
+
+	// Estado de sincronização com Spotify Connect. Mesma semântica da
+	// PlaylistView — guarda o último snapshot do /currently-playing e
+	// interpola a posição real entre polls.
+	SpotifyLastProgressMs  int
+	SpotifyLastTimestamp   int64
+	SpotifyLastPollAt      time.Time
+	SpotifyItemDurationMs  int
+	SpotifyItemID          string
 
 	// Playlist picker
 	Playlists        []api.Playlist
@@ -172,9 +191,10 @@ type createPlaylistResultMsg struct {
 }
 
 type localResolveMsg struct {
-	track  api.Track
-	stream string
-	err    error
+	track    api.Track
+	stream   string
+	startSec int
+	err      error
 }
 
 func addTrackCmd(client *api.Client, playlistID uint, track api.Track, name string) tea.Cmd {
@@ -197,10 +217,13 @@ func createPlaylistAndAddCmd(client *api.Client, name string, track api.Track) t
 	}
 }
 
-func resolveAndPlayLocalCmd(client *api.Client, track api.Track) tea.Cmd {
+// resolveAndPlayLocalCmd resolve a stream URL da faixa e devolve um
+// localResolveMsg com startSec (posição em segundos) onde o player local
+// deve começar. startSec=0 significa "do início".
+func resolveAndPlayLocalCmd(client *api.Client, track api.Track, startSec int) tea.Cmd {
 	return func() tea.Msg {
 		url, err := client.GetStreamURL(track.Source, track.SourceID)
-		return localResolveMsg{track: track, stream: url, err: err}
+		return localResolveMsg{track: track, stream: url, startSec: startSec, err: err}
 	}
 }
 
@@ -229,6 +252,20 @@ func (v *SearchView) Update(msg tea.Msg, client *api.Client) (*SearchView, tea.C
 		v.State = msg.newState
 		if msg.uri != "" {
 			v.PlayingURI = msg.uri
+			// Reset posição e estado de sync do Spotify Connect ao
+			// tocar nova faixa. O próximo poll vai repopular
+			// timestamp/progress_ms.
+			v.PositionSec = 0
+			v.SpotifyLastProgressMs = 0
+			v.SpotifyLastTimestamp = 0
+			v.SpotifyLastPollAt = time.Time{}
+			v.SpotifyItemDurationMs = 0
+			v.SpotifyItemID = ""
+			return v, tea.Batch(
+				positionTickCmd(),
+				pollSpotifyPositionCmd(v.Client),
+				initialSpotifyPositionCmd(),
+			)
 		}
 	case simpleResultMsg:
 		v.Pending = false
@@ -242,7 +279,7 @@ func (v *SearchView) Update(msg tea.Msg, client *api.Client) (*SearchView, tea.C
 			return v, nil
 		}
 		v.stopLocal()
-		player, err := utils.Play(msg.stream)
+		player, err := utils.Play(msg.stream, msg.startSec)
 		if err != nil {
 			v.PlayerErr = err.Error()
 			v.State = stateStopped
@@ -250,10 +287,72 @@ func (v *SearchView) Update(msg tea.Msg, client *api.Client) (*SearchView, tea.C
 		}
 		v.LocalPlayer = player
 		v.LocalURL = msg.stream
+		v.LocalStartSec = msg.startSec
+		v.LocalStartedAt = time.Now()
 		v.State = statePlaying
 		v.PlayingURI = playingURIFor(msg.track)
+		v.PositionSec = msg.startSec
 		v.PlayerErr = ""
 		v.PlayerMsg = "▶ " + msg.track.Title + " - " + msg.track.Artist
+		return v, positionTickCmd()
+	case positionTickMsg:
+		if v.State == statePlaying && v.PlayingURI != "" {
+			if v.LocalPlayer != nil {
+				v.PositionSec = v.currentLocalPositionSec()
+				return v, positionTickCmd()
+			}
+			if isConnectURI(v.PlayingURI) {
+				// Spotify Connect: interpola entre polls usando o
+				// `timestamp` que o Spotify devolve junto com
+				// progress_ms — sem acumulação de drift.
+				v.PositionSec = v.currentSpotifyPositionSec()
+				return v, positionTickCmd()
+			}
+		}
+	case pollSpotifyPositionMsg:
+		if msg.err != nil {
+			return v, nil
+		}
+		if msg.uri != v.PlayingURI {
+			return v, nil
+		}
+		// Salva o snapshot pra interpolação entre polls.
+		v.SpotifyLastProgressMs = msg.progressMs
+		v.SpotifyLastTimestamp = msg.timestamp
+		v.SpotifyLastPollAt = time.Now()
+		v.SpotifyItemDurationMs = msg.itemDurationMs
+		v.SpotifyItemID = msg.itemID
+		v.PositionSec = msg.progressMs / 1000
+		if msg.isPlaying && v.State == statePlaying {
+			return v, repollSpotifyPositionCmd()
+		}
+		if !msg.isPlaying && v.State == statePlaying {
+			v.State = statePaused
+		}
+		return v, nil
+	case repollSpotifyPositionMsg:
+		if v.State == statePlaying && v.PlayingURI != "" && isConnectURI(v.PlayingURI) {
+			return v, pollSpotifyPositionCmd(v.Client)
+		}
+	case initialSpotifyPositionMsg:
+		// Poll rápido 1s depois do play. Pode pegar a posição real
+		// caso o Spotify ainda não tivesse propagado a faixa no
+		// poll inicial.
+		if v.State == statePlaying && v.PlayingURI != "" && isConnectURI(v.PlayingURI) {
+			return v, pollSpotifyPositionCmd(v.Client)
+		}
+	case seekResultMsg:
+		// Resposta do POST /player/seek. Re-polla pra confirmar a
+		// nova posição.
+		v.Pending = false
+		if msg.err != nil {
+			v.PlayerErr = "Erro ao seek: " + msg.err.Error()
+			return v, nil
+		}
+		v.PlayerErr = ""
+		if v.State == statePlaying && v.PlayingURI != "" && isConnectURI(v.PlayingURI) {
+			return v, pollSpotifyPositionCmd(v.Client)
+		}
 	case playlistsLoadedMsg:
 		v.PlaylistLoading = false
 		if msg.err != nil {
@@ -356,7 +455,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 				uri := "spotify:track:" + track.SourceID
 				v.PlayerErr = ""
 				v.Pending = true
-				return v, playTrackCmd(v.Client, uri)
+				return v, playTrackCmd(v.Client, uri, 0)
 			}
 		}
 		// SoundCloud/YouTube/outra fonte local: resolve URL e toca via mpv
@@ -370,7 +469,7 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 		}
 		v.PlayerErr = ""
 		v.Pending = true
-		return v, resolveAndPlayLocalCmd(v.Client, track)
+		return v, resolveAndPlayLocalCmd(v.Client, track, 0)
 	case "ctrl+s":
 		if isConnectSource(v.Source) {
 			if v.State != statePlaying || v.Pending {
@@ -397,6 +496,41 @@ func (v *SearchView) updateResultsMode(msg tea.KeyMsg) (*SearchView, tea.Cmd) {
 			return v, nextCmd(v.Client)
 		}
 		return v, previousCmd(v.Client)
+	case "ctrl+left", "ctrl+right":
+		// Seek ±10s no Spotify Connect. Mesma lógica da PlaylistView.
+		if v.Pending {
+			return v, nil
+		}
+		if v.PlayingURI == "" || !isConnectURI(v.PlayingURI) {
+			return v, nil
+		}
+		if v.State != statePlaying && v.State != statePaused {
+			return v, nil
+		}
+		delta := 10
+		if msg.String() == "ctrl+left" {
+			delta = -10
+		}
+		current := v.currentSpotifyPositionSec()
+		max := v.SpotifyItemDurationMs / 1000
+		if max == 0 {
+			for _, t := range v.Results {
+				if playingURIFor(t) == v.PlayingURI {
+					max = t.Duration
+					break
+				}
+			}
+		}
+		newSec := current + delta
+		if newSec < 0 {
+			newSec = 0
+		}
+		if max > 0 && newSec > max {
+			newSec = max
+		}
+		v.Pending = true
+		v.PlayerErr = ""
+		return v, seekCmd(v.Client, newSec*1000, delta)
 	case "ctrl+a":
 		if len(v.Results) == 0 || v.AddResultPending {
 			return v, nil
@@ -475,6 +609,45 @@ func (v *SearchView) stopLocal() {
 		v.LocalPlayer = nil
 	}
 	v.LocalURL = ""
+}
+
+// currentLocalPositionSec retorna a posição atual (em segundos) do
+// player local, baseada em LocalStartSec + elapsed desde LocalStartedAt.
+// Se o player não existe (parado), devolve LocalStartSec.
+func (v *SearchView) currentLocalPositionSec() int {
+	if v.LocalPlayer == nil {
+		return v.LocalStartSec
+	}
+	elapsed := int(time.Since(v.LocalStartedAt).Seconds())
+	return v.LocalStartSec + elapsed
+}
+
+// currentSpotifyPositionSec retorna a posição atual (em segundos) da
+// faixa do Spotify Connect via interpolação por timestamp. Mesma
+// semântica do helper na PlaylistView.
+func (v *SearchView) currentSpotifyPositionSec() int {
+	if v.SpotifyLastPollAt.IsZero() || v.SpotifyLastTimestamp == 0 {
+		return v.SpotifyLastProgressMs / 1000
+	}
+	elapsedMs := time.Since(v.SpotifyLastPollAt).Milliseconds()
+	totalMs := v.SpotifyLastProgressMs + int(elapsedMs)
+	return totalMs / 1000
+}
+
+// currentDisplayPositionSec retorna a posição (em segundos) a exibir
+// na UI. Pausado congela em PositionSec; tocando usa clock local
+// (LocalPlayer) ou interpolação por timestamp (Connect).
+func (v *SearchView) currentDisplayPositionSec() int {
+	if v.State == statePaused {
+		return v.PositionSec
+	}
+	if v.LocalPlayer != nil {
+		return v.currentLocalPositionSec()
+	}
+	if isConnectURI(v.PlayingURI) {
+		return v.currentSpotifyPositionSec()
+	}
+	return v.PositionSec
 }
 
 func (v *SearchView) View() string {
@@ -570,16 +743,20 @@ func (v *SearchView) viewResults(title string) string {
 		if v.LocalPlayer != nil {
 			backend = v.LocalPlayer.Backend() + " (local)"
 		}
+		pos := v.currentDisplayPositionSec()
 		status = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(
-			"▶ Tocando via " + backend,
+			fmt.Sprintf("▶ Tocando via %s  ·  %s", backend, formatDuration(pos)),
 		)
 	case v.State == statePaused:
-		status = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("⏸ Pausado")
+		pos := v.currentDisplayPositionSec()
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(
+			fmt.Sprintf("⏸ Pausado  ·  %s", formatDuration(pos)),
+		)
 	}
 
-	help := "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  ↑/↓: Nav  Esc: Back"
+	help := "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+←/→] Seek ±10s  [Ctrl+A] Add  ↑/↓: Nav  Esc: Back"
 	if len(v.availableSources) > 1 {
-		help = "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+A] Add to playlist  [Tab] Source  ↑/↓: Nav  Esc: Back"
+		help = "[Ctrl+P] Play  [Ctrl+S] Pause  [Ctrl+←/→] Seek ±10s  [Ctrl+A] Add  [Tab] Source  ↑/↓: Nav  Esc: Back"
 	}
 	return lipgloss.JoinVertical(
 		lipgloss.Left,

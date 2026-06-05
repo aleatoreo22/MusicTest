@@ -31,8 +31,9 @@ type Provider struct {
 	cookiesFile string
 	format     string
 
-	mu    sync.Mutex
-	cache *searchCache
+	mu          sync.Mutex
+	cache       *searchCache
+	streamCache *streamCache
 }
 
 type searchCacheEntry struct {
@@ -45,6 +46,27 @@ type searchCache struct {
 	ttl  time.Duration
 }
 
+type streamCacheEntry struct {
+	url       string
+	expiresAt time.Time
+}
+
+// streamCache guarda URLs diretas de stream já resolvidas pelo yt-dlp. Cada
+// entrada custa ~1-2s pra gerar (subprocess Python + chamada ao YouTube),
+// então cachear é a otimização de latência mais impactante. TTL de 3h30 é
+// conservador — YouTube rotaciona as URLs em ~6h, mas refreshs mais cedo
+// são comuns.
+type streamCache struct {
+	data map[string]streamCacheEntry
+	ttl  time.Duration
+}
+
+const (
+	searchCacheTTL   = 5 * time.Minute
+	streamCacheTTL   = 3*time.Hour + 30*time.Minute
+	prefetchOnSearch = 3 // quantos resultados do topo do search já pré-resolver
+)
+
 // NewProvider detecta yt-dlp no PATH. Falha silenciosa se não estiver —
 // Enabled() retornará false e o provider não aparece na listagem.
 func NewProvider() *Provider {
@@ -55,7 +77,11 @@ func NewProvider() *Provider {
 		format:      "bestaudio[ext=m4a]/bestaudio/best",
 		cache: &searchCache{
 			data: make(map[string]searchCacheEntry),
-			ttl:  5 * time.Minute,
+			ttl:  searchCacheTTL,
+		},
+		streamCache: &streamCache{
+			data: make(map[string]streamCacheEntry),
+			ttl:  streamCacheTTL,
 		},
 	}
 }
@@ -97,6 +123,7 @@ func (p *Provider) Search(ctx context.Context, query string, limit int) ([]model
 		"--dump-json",
 		"--skip-download",
 		"--no-warnings",
+		"--no-progress",
 		"--no-playlist",
 	}
 	if p.cookiesFile != "" {
@@ -113,11 +140,49 @@ func (p *Provider) Search(ctx context.Context, query string, limit int) ([]model
 		return nil, nil
 	}
 	p.cachePut(cacheKey, tracks)
+	p.prefetchTopResults(tracks)
 	return tracks, nil
+}
+
+// prefetchTopResults dispara resoluções de stream URL em background pros N
+// primeiros resultados. O usuário vai pagar o custo do yt-dlp durante o
+// search (que ele já está esperando) em vez de pagar quando apertar play.
+// Cada goroutine usa context.Background pra não ser cancelada quando a
+// request HTTP do search terminar.
+func (p *Provider) prefetchTopResults(tracks []models.Track) {
+	n := prefetchOnSearch
+	if len(tracks) < n {
+		n = len(tracks)
+	}
+	for i := 0; i < n; i++ {
+		track := tracks[i]
+		if track.SourceID == "" {
+			continue
+		}
+		if _, _, cached := p.streamCacheGet(track.SourceID); cached {
+			continue
+		}
+		go p.resolveAndCache(track.SourceID)
+	}
+}
+
+// resolveAndCache faz Stream() e popula o streamCache. Erros são silenciosos
+// — pre-fetch é melhor-esforço, falha aqui não afeta o usuário.
+func (p *Provider) resolveAndCache(videoID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	url, _, err := p.Stream(ctx, videoID)
+	if err != nil {
+		return
+	}
+	p.streamCachePut(videoID, url)
 }
 
 // Stream resolve a URL direta de áudio pra um vídeo do YouTube. A URL expira
 // em algumas horas (server-side) — retornamos um expires_at conservador de 4h.
+// Cache: streams resolvidos recentemente são servidos do streamCache sem
+// invocar yt-dlp, eliminando o custo de subprocess Python + chamada ao
+// YouTube (~1-2s) em plays repetidos.
 func (p *Provider) Stream(ctx context.Context, videoID string) (string, time.Time, error) {
 	if !p.Enabled() {
 		return "", time.Time{}, ErrNotAvailable
@@ -126,12 +191,17 @@ func (p *Provider) Stream(ctx context.Context, videoID string) (string, time.Tim
 		return "", time.Time{}, errors.New("youtube: videoID vazio")
 	}
 
+	if cachedURL, expires, ok := p.streamCacheGet(videoID); ok {
+		return cachedURL, expires, nil
+	}
+
 	watchURL := "https://www.youtube.com/watch?v=" + videoID
 	args := []string{
 		watchURL,
 		"-f", p.format,
 		"-g",
 		"--no-warnings",
+		"--no-progress",
 		"--no-playlist",
 	}
 	if p.cookiesFile != "" {
@@ -151,6 +221,7 @@ func (p *Provider) Stream(ctx context.Context, videoID string) (string, time.Tim
 	}
 	streamURL := urls[0]
 	expires := time.Now().Add(4 * time.Hour)
+	p.streamCachePut(videoID, streamURL)
 	return streamURL, expires, nil
 }
 
@@ -272,6 +343,25 @@ func (p *Provider) cachePut(key string, tracks []models.Track) {
 	p.cache.data[key] = searchCacheEntry{
 		tracks:    tracks,
 		expiresAt: time.Now().Add(p.cache.ttl),
+	}
+}
+
+func (p *Provider) streamCacheGet(videoID string) (string, time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.streamCache.data[videoID]
+	if !ok || time.Now().After(e.expiresAt) {
+		return "", time.Time{}, false
+	}
+	return e.url, e.expiresAt, true
+}
+
+func (p *Provider) streamCachePut(videoID, url string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.streamCache.data[videoID] = streamCacheEntry{
+		url:       url,
+		expiresAt: time.Now().Add(p.streamCache.ttl),
 	}
 }
 

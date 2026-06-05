@@ -26,6 +26,11 @@ type PlayRequest struct {
 	DeviceID string `json:"device_id,omitempty"`
 }
 
+type SeekRequest struct {
+	PositionMs int `json:"position_ms"`
+	DeviceID   string `json:"device_id,omitempty"`
+}
+
 func (h *PlayerHandler) client(c *gin.Context) (*spotifyapi.Client, error) {
 	userID, _ := c.Get("userID")
 	user, err := h.userRepo.FindByID(userID.(uint))
@@ -117,6 +122,40 @@ func (h *PlayerHandler) Previous(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// Seek move a posição de reprodução do Spotify Connect pra `req.PositionMs`
+// (em milissegundos, relativo ao início da faixa atual). Usado pelo TUI
+// pra sincronizar a posição depois de um seek local. Se o position_ms
+// passar da duração da faixa, o Spotify pula pra próxima automaticamente.
+func (h *PlayerHandler) Seek(c *gin.Context) {
+	var req SeekRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.PositionMs < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "position_ms deve ser >= 0"})
+		return
+	}
+
+	cli, err := h.client(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	opt := &spotifyapi.PlayOptions{}
+	if req.DeviceID != "" {
+		id := spotifyapi.ID(req.DeviceID)
+		opt.DeviceID = &id
+	}
+	if err := cli.SeekOpt(c.Request.Context(), req.PositionMs, opt); err != nil {
+		status, msg := classifySpotifyErr(err)
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "position_ms": req.PositionMs})
+}
+
 func (h *PlayerHandler) Devices(c *gin.Context) {
 	cli, err := h.client(c)
 	if err != nil {
@@ -129,6 +168,19 @@ func (h *PlayerHandler) Devices(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, devs)
+}
+
+// PlaybackSnapshotFlat é a projeção do CurrentlyPlaying do Spotify SDK
+// pros campos que o TUI usa pra sincronizar. Retornamos um objeto flat
+// (em vez do SDK completo) pra evitar dependência de JSON tags internos
+// do zmb3/spotify e pra dar nomes mais claros no contrato HTTP.
+type PlaybackSnapshotFlat struct {
+	IsPlaying       bool   `json:"is_playing"`
+	ProgressMs      int    `json:"progress_ms"`
+	Timestamp       int64  `json:"timestamp"`
+	URI             string `json:"uri"`
+	ItemID          string `json:"item_id,omitempty"`
+	ItemDurationMs  int    `json:"item_duration_ms,omitempty"`
 }
 
 func (h *PlayerHandler) CurrentlyPlaying(c *gin.Context) {
@@ -146,7 +198,17 @@ func (h *PlayerHandler) CurrentlyPlaying(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"is_playing": false})
 		return
 	}
-	c.JSON(http.StatusOK, cp)
+	resp := PlaybackSnapshotFlat{
+		IsPlaying:  cp.Playing,
+		ProgressMs: int(cp.Progress),
+		Timestamp:  cp.Timestamp,
+	}
+	if cp.Item != nil {
+		resp.URI = string(cp.Item.URI)
+		resp.ItemID = string(cp.Item.ID)
+		resp.ItemDurationMs = int(cp.Item.Duration)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func classifySpotifyErr(err error) (int, string) {

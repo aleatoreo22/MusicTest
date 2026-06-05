@@ -30,7 +30,8 @@ const (
 
 func NewModel() *Model {
 	apiClient := api.NewClient("http://localhost:8080")
-	return &Model{
+
+	m := &Model{
 		state:        authState,
 		apiClient:    apiClient,
 		authView:     views.NewAuthView(),
@@ -39,6 +40,16 @@ func NewModel() *Model {
 		playlistView: views.NewPlaylistView(apiClient),
 		spotifyView:  views.NewSpotifyLinkView(apiClient),
 	}
+
+	if email, password := loadCredentials(); email != "" {
+		if resp, err := apiClient.Login(email, password); err == nil {
+			apiClient.SetToken(resp.Token)
+			m.state = homeState
+			m.authView.IsAuthenticated = true
+		}
+	}
+
+	return m
 }
 
 type providersLoadedMsg struct {
@@ -80,6 +91,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authView, cmd = m.authView.Update(msg, m.apiClient)
 		if m.authView.IsAuthenticated {
 			m.state = homeState
+			saveCredentials(m.authView.Email, m.authView.Password)
 			if !m.providersLoaded {
 				return m, loadProvidersCmd(m.apiClient)
 			}
@@ -107,6 +119,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = spotifyState
 				m.spotifyView = views.NewSpotifyLinkView(m.apiClient)
 			case "auth":
+				clearCredentials()
 				m.state = authState
 				m.authView = views.NewAuthView()
 				m.providersLoaded = false

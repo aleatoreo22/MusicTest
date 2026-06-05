@@ -148,6 +148,49 @@ func (c *Client) GetStreamURL(source, sourceID string) (string, error) {
 	}
 }
 
+// PrefetchStreamURL resolve e descarta o resultado — usado pra aquecer o
+// cache do servidor (yt-dlp / SoundCloud) em background, antes da hora real
+// de tocar. Erros são silenciosos porque pre-fetch é melhor-esforço.
+func (c *Client) PrefetchStreamURL(source, sourceID string) {
+	_, _ = c.GetStreamURL(source, sourceID)
+}
+
+// PlaybackSnapshot é o estado atual de reprodução do Spotify Connect.
+// É um subconjunto do CurrentlyPlaying do Spotify — só os campos que
+// precisamos pra sincronizar a UI com precisão.
+//
+// O `Timestamp` (epoch ms) é o momento em que o servidor do Spotify
+// respondeu. Combinado com `ProgressMs`, o client pode calcular a
+// posição real em qualquer "agora" sem polling constante:
+//   posMs = ProgressMs + (now - Timestamp)
+//
+// O `ItemDurationMs` é a duração da faixa atual (vem de item.duration_ms);
+// é usado pra detectar fim de faixa e limites de seek. Vem como
+// `omitempty` porque pode estar ausente quando nada está tocando.
+type PlaybackSnapshot struct {
+	Playing        bool   `json:"is_playing"`
+	ProgressMs     int    `json:"progress_ms"`
+	Timestamp      int64  `json:"timestamp"`
+	URI            string `json:"uri"`
+	ItemID         string `json:"item_id,omitempty"`
+	ItemDurationMs int    `json:"item_duration_ms,omitempty"`
+}
+
+// CurrentlyPlaying consulta o estado atual de reprodução do Spotify Connect
+// (proxy ao endpoint /api/v1/player/currently-playing do backend). Retorna
+// nil+nil se nada está tocando (estado limpo, sem erro).
+func (c *Client) CurrentlyPlaying() (*PlaybackSnapshot, error) {
+	data, err := c.request("GET", "/api/v1/player/currently-playing", nil)
+	if err != nil {
+		return nil, err
+	}
+	var snap PlaybackSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
 func (c *Client) GetProviders() ([]string, error) {
 	data, err := c.request("GET", "/api/v1/providers", nil)
 	if err != nil {
@@ -225,6 +268,16 @@ func (c *Client) Resume() error {
 
 func (c *Client) Pause() error {
 	_, err := c.request("POST", "/api/v1/player/pause", nil)
+	return err
+}
+
+// Seek move a reprodução atual do Spotify Connect pra `positionMs`
+// (em milissegundos). Se passar da duração da faixa, o Spotify pula
+// pra próxima automaticamente. Usado pelo TUI pra sincronizar a UI
+// depois de um seek local (← / →) ou pra alinhar com posição externa.
+func (c *Client) Seek(positionMs int) error {
+	body := map[string]int{"position_ms": positionMs}
+	_, err := c.request("POST", "/api/v1/player/seek", body)
 	return err
 }
 
