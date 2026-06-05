@@ -1,36 +1,36 @@
 package handlers
 
 import (
-	"music-unified-backend/internal/providers/soundcloud"
+	"music-unified-backend/internal/providers"
 	"music-unified-backend/internal/providers/spotify"
-	"music-unified-backend/internal/providers/youtube"
+	"music-unified-backend/pkg/httputil"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
+// ProvidersHandler lista os providers habilitados. Aceita providers
+// que implementam a interface comum (busca/stream sem contexto de
+// usuário) e, opcionalmente, o Spotify separadamente — que precisa
+// de OAuth por usuário e não se enquadra na interface.
 type ProvidersHandler struct {
-	spotify    *spotify.Provider
-	soundcloud *soundcloud.Provider
-	youtube    *youtube.Provider
+	providers []providers.Provider
+	spotify   *spotify.Provider
 }
 
-func NewProvidersHandler(sp *spotify.Provider, sc *soundcloud.Provider, yt *youtube.Provider) *ProvidersHandler {
-	return &ProvidersHandler{spotify: sp, soundcloud: sc, youtube: yt}
+func NewProvidersHandler(p []providers.Provider, sp *spotify.Provider) *ProvidersHandler {
+	return &ProvidersHandler{providers: p, spotify: sp}
 }
 
 func (h *ProvidersHandler) List(c *gin.Context) {
-	providers := []string{}
+	names := make([]string, 0, len(h.providers)+1)
+	for _, p := range h.providers {
+		if p.Enabled() {
+			names = append(names, p.Name())
+		}
+	}
 	if h.spotify != nil && h.spotify.Enabled() {
-		providers = append(providers, "spotify")
+		names = append(names, h.spotify.Name())
 	}
-	if h.soundcloud != nil && h.soundcloud.Enabled() {
-		providers = append(providers, "soundcloud")
-	}
-	if h.youtube != nil && h.youtube.Enabled() {
-		providers = append(providers, "youtube")
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"providers": providers,
-	})
+	httputil.JSON(c, http.StatusOK, gin.H{"providers": names})
 }
