@@ -3,7 +3,7 @@ package handlers
 import (
 	"music-unified-backend/internal/models"
 	"music-unified-backend/internal/repository"
-	"net/http"
+	"music-unified-backend/pkg/httputil"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -18,55 +18,55 @@ func NewPlaylistHandler(repo repository.PlaylistRepository) *PlaylistHandler {
 }
 
 func (h *PlaylistHandler) Create(c *gin.Context) {
-	userID, _ := c.Get("userID")
+	userID, ok := httputil.MustUserID(c)
+	if !ok {
+		return
+	}
 	var req models.CreatePlaylistRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
-
-	playlist := models.Playlist{
-		Name:   req.Name,
-		UserID: userID.(uint),
-	}
-
+	playlist := models.Playlist{Name: req.Name, UserID: userID}
 	if err := h.playlistRepo.Create(&playlist); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao criar playlist"})
+		httputil.Error(c, httputil.Internal("Erro ao criar playlist"))
 		return
 	}
-
-	c.JSON(http.StatusCreated, playlist)
+	httputil.JSON(c, 201, playlist)
 }
 
 func (h *PlaylistHandler) List(c *gin.Context) {
-	userID, _ := c.Get("userID")
-	playlists, err := h.playlistRepo.FindAllByUserID(userID.(uint))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao listar playlists"})
+	userID, ok := httputil.MustUserID(c)
+	if !ok {
 		return
 	}
-
-	c.JSON(http.StatusOK, playlists)
+	playlists, err := h.playlistRepo.FindAllByUserID(userID)
+	if err != nil {
+		httputil.Error(c, httputil.Internal("Erro ao listar playlists"))
+		return
+	}
+	httputil.JSON(c, 200, playlists)
 }
 
 func (h *PlaylistHandler) AddTrack(c *gin.Context) {
-	userID, _ := c.Get("userID")
-	playlistIDStr := c.Param("id")
-	playlistID, _ := strconv.ParseUint(playlistIDStr, 10, 32)
-
+	userID, ok := httputil.MustUserID(c)
+	if !ok {
+		return
+	}
+	playlistID, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		httputil.Error(c, httputil.BadRequest("ID inválido"))
+		return
+	}
 	var req models.AddTrackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httputil.Error(c, httputil.BadRequest(err.Error()))
 		return
 	}
-
-	// Verifica se a playlist pertence ao usuário
-	_, err := h.playlistRepo.FindByID(uint(playlistID), userID.(uint))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Playlist não encontrada ou acesso negado"})
+	if _, err := h.playlistRepo.FindByID(uint(playlistID), userID); err != nil {
+		httputil.Error(c, httputil.NotFound("Playlist não encontrada ou acesso negado"))
 		return
 	}
-
 	track := models.Track{
 		Title:     req.Title,
 		Artist:    req.Artist,
@@ -76,11 +76,9 @@ func (h *PlaylistHandler) AddTrack(c *gin.Context) {
 		SourceID:  req.SourceID,
 		LocalPath: req.LocalPath,
 	}
-
 	if err := h.playlistRepo.AddTrack(uint(playlistID), &track); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erro ao adicionar música"})
+		httputil.Error(c, httputil.Internal("Erro ao adicionar música"))
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Música adicionada com sucesso"})
+	httputil.JSON(c, 200, gin.H{"message": "Música adicionada com sucesso"})
 }
