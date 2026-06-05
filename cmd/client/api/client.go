@@ -271,6 +271,15 @@ func (c *Client) Pause() error {
 	return err
 }
 
+// PauseCleanup é a variante best-effort usada pelo TUI no Ctrl+C.
+// O backend trata erros do Spotify (sem device, premium required,
+// token expirado) como no-op e retorna 200. Use Pause() quando quiser
+// feedback real pro usuário.
+func (c *Client) PauseCleanup() error {
+	_, err := c.request("POST", "/api/v1/player/pause?cleanup=1", nil)
+	return err
+}
+
 // Seek move a reprodução atual do Spotify Connect pra `positionMs`
 // (em milissegundos). Se passar da duração da faixa, o Spotify pula
 // pra próxima automaticamente. Usado pelo TUI pra sincronizar a UI

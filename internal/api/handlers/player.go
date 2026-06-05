@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"music-unified-backend/internal/providers/spotify"
 	"music-unified-backend/internal/repository"
 	"net/http"
@@ -87,6 +88,15 @@ func (h *PlayerHandler) Pause(c *gin.Context) {
 		return
 	}
 	if err := cli.Pause(c.Request.Context()); err != nil {
+		// Cleanup do TUI no Ctrl+C: best-effort, nunca falha. Erros
+		// "no active device", "premium required", token expirado são
+		// todos no-op pra finalidade de "garantir que parou". Logamos
+		// server-side mas respondemos 200.
+		if c.Query("cleanup") == "1" {
+			log.Printf("player/pause (cleanup) ignorou erro: %v", err)
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+			return
+		}
 		status, msg := classifySpotifyErr(err)
 		c.JSON(status, gin.H{"error": msg})
 		return

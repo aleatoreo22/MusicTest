@@ -3,6 +3,8 @@ package main
 import (
 	"music-unified-backend/cmd/client/api"
 	"music-unified-backend/cmd/client/views"
+	"music-unified-backend/pkg/utils"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -64,6 +66,32 @@ func loadProvidersCmd(client *api.Client) tea.Cmd {
 	}
 }
 
+// FinalCleanup é chamado por main() APÓS p.Run() retornar (ou por
+// signal handler se o processo receber SIGINT/SIGTERM/SIGHUP). Idempotente.
+//
+// Mata qualquer player local ativo (mpv/ffplay/vlc) e pausa o Spotify
+// Connect. Best-effort: erros são silenciosos — não há o que fazer se
+// a chamada falhar nesse ponto.
+func (m *Model) FinalCleanup() {
+	utils.StopActive()
+	if m.hasSpotifyActive() && m.apiClient != nil {
+		_ = m.apiClient.PauseCleanup()
+	}
+}
+
+// hasSpotifyActive retorna true se alguma view tem uma faixa do Spotify
+// marcada como a faixa atual em PlayingURI. Usado pelo cleanup pra
+// decidir se vale chamar /player/pause.
+func (m *Model) hasSpotifyActive() bool {
+	if m.searchView != nil && strings.HasPrefix(m.searchView.PlayingURI, "spotify:") {
+		return true
+	}
+	if m.playlistView != nil && strings.HasPrefix(m.playlistView.PlayingURI, "spotify:") {
+		return true
+	}
+	return false
+}
+
 func (m *Model) Init() tea.Cmd {
 	return nil
 }
@@ -72,6 +100,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
+			// NÃO fazemos cleanup aqui. O cleanup é responsabilidade de
+			// main() DEPOIS de p.Run() retornar — se rodasse como tea.Cmd
+			// em batch com tea.Quit, o request HTTP pro backend seria
+			// cancelado quando o processo saísse antes de o Spotify SDK
+			// completar a chamada (token refresh é lento).
 			return m, tea.Quit
 		}
 	case providersLoadedMsg:
